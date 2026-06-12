@@ -55,6 +55,7 @@ typedef struct {
 typedef struct {
 	const char *id;
 	const char *title;
+	const char *mark;
 	uint32_t tags;
 	int32_t isfloating;
 	int32_t isfullscreen;
@@ -283,6 +284,8 @@ typedef struct {
 	uint32_t scroll_button;
 	uint32_t click_method;
 	uint32_t send_events_mode;
+	int32_t initial_tags_count;
+	int32_t auto_remove_empty_tags;
 
 	/* mouse */
 	int32_t mouse_natural_scrolling;
@@ -1047,6 +1050,10 @@ FuncType parse_func_name(char *func_name, Arg *arg, char *arg_value,
 	} else if (strcmp(func_name, "tagtoright") == 0) {
 		func = tagtoright;
 		(*arg).i = atoi(arg_value);
+	} else if (strcmp(func_name, "add_tag") == 0) {
+		func = add_tag;
+	} else if (strcmp(func_name, "remove_tag") == 0) {
+		func = remove_tag;
 	} else if (strcmp(func_name, "killclient") == 0) {
 		func = killclient;
 		(*arg).i = parse_force(arg_value);
@@ -1736,6 +1743,10 @@ bool parse_option(Config *config, char *key, char *value) {
 		config->repeat_rate = atoi(value);
 	} else if (strcmp(key, "repeat_delay") == 0) {
 		config->repeat_delay = atoi(value);
+	} else if (strcmp(key, "initial_tags_count") == 0) {
+		config->initial_tags_count = atoi(value);
+	} else if (strcmp(key, "auto_remove_empty_tags") == 0) {
+		config->auto_remove_empty_tags = atoi(value);
 	} else if (strcmp(key, "disable_trackpad") == 0) {
 		config->disable_trackpad = atoi(value);
 	} else if (strcmp(key, "tap_to_click") == 0) {
@@ -2216,6 +2227,7 @@ bool parse_option(Config *config, char *key, char *value) {
 		rule->monitor = NULL;
 		rule->id = NULL;
 		rule->title = NULL;
+		rule->mark = NULL;
 
 		rule->globalkeybinding = (KeyBinding){0};
 
@@ -2235,6 +2247,8 @@ bool parse_option(Config *config, char *key, char *value) {
 					rule->isfloating = atoi(val);
 				} else if (strcmp(key, "title") == 0) {
 					rule->title = strdup(val);
+				} else if (strcmp(key, "mark") == 0) {
+					rule->mark = strdup(val);
 				} else if (strcmp(key, "appid") == 0) {
 					rule->id = strdup(val);
 				} else if (strcmp(key, "animation_type_open") == 0) {
@@ -3002,6 +3016,8 @@ void free_config(void) {
 				free((void *)rule->id);
 			if (rule->title)
 				free((void *)rule->title);
+			if (rule->mark)
+				free((void *)rule->mark);
 			if (rule->animation_type_open)
 				free((void *)rule->animation_type_open);
 			if (rule->animation_type_close)
@@ -3010,6 +3026,7 @@ void free_config(void) {
 				free((void *)rule->monitor);
 			rule->id = NULL;
 			rule->title = NULL;
+			rule->mark = NULL;
 			rule->animation_type_open = NULL;
 			rule->animation_type_close = NULL;
 			rule->monitor = NULL;
@@ -3349,6 +3366,8 @@ void override_config(void) {
 	config.single_scratchpad = CLAMP_INT(config.single_scratchpad, 0, 1);
 	config.repeat_rate = CLAMP_INT(config.repeat_rate, 1, 1000);
 	config.repeat_delay = CLAMP_INT(config.repeat_delay, 1, 20000);
+	config.initial_tags_count = CLAMP_INT(config.initial_tags_count, 1, 32);
+	config.auto_remove_empty_tags = CLAMP_INT(config.auto_remove_empty_tags, 0, 1);
 	config.numlockon = CLAMP_INT(config.numlockon, 0, 1);
 	config.disable_trackpad = CLAMP_INT(config.disable_trackpad, 0, 1);
 	config.tap_to_click = CLAMP_INT(config.tap_to_click, 0, 1);
@@ -3514,6 +3533,8 @@ void set_value_default() {
 
 	config.repeat_rate = 25;
 	config.repeat_delay = 600;
+	config.initial_tags_count = 9;
+	config.auto_remove_empty_tags = 0;
 
 	config.disable_trackpad = 0;
 	config.tap_to_click = 1;

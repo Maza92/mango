@@ -3,6 +3,10 @@ int32_t bind_to_view(const Arg *arg) {
 		return 0;
 	uint32_t target = arg->ui;
 
+	if (target && target != (~0 & TAGMASK) && !(target & selmon->active_tags_mask)) {
+		return 0;
+	}
+
 	if (config.view_current_to_back && selmon->pertag->curtag &&
 		(target & TAGMASK) == (selmon->tagset[selmon->seltags])) {
 		if (selmon->pertag->prevtag)
@@ -1108,6 +1112,8 @@ int32_t tag(const Arg *arg) {
 	if (!selmon)
 		return 0;
 	Client *target_client = arg->tc ? arg->tc : selmon->sel;
+	if (arg->ui && !(arg->ui & selmon->active_tags_mask))
+		return 0;
 	tag_client(arg, target_client);
 	return 0;
 }
@@ -1192,6 +1198,9 @@ int32_t tagsilent(const Arg *arg) {
 	if (!target_client)
 		return 0;
 
+	if (arg->ui && !(arg->ui & target_client->mon->active_tags_mask))
+		return 0;
+
 	target_client->tags = arg->ui & TAGMASK;
 	wl_list_for_each(fc, &clients, link) {
 		if (fc && fc != target_client && target_client->tags & fc->tags &&
@@ -1211,18 +1220,32 @@ int32_t tagtoleft(const Arg *arg) {
 	Client *sel = arg->tc ? arg->tc : selmon->sel;
 	if (sel != NULL &&
 		__builtin_popcount(selmon->tagset[selmon->seltags] & TAGMASK) == 1) {
-		uint32_t target = selmon->tagset[selmon->seltags] >> 1;
-
-		if (target == 0) {
-			if (!config.tag_carousel)
-				return 0;
-			target = (1 << (LENGTH(tags) - 1)) & TAGMASK;
-			selmon->carousel_anim_dir = -1;
+		unsigned int current = __builtin_ctz(selmon->tagset[selmon->seltags]) + 1;
+		int n;
+		bool found = false;
+		for (n = (int)current - 1; n >= 1; n--) {
+			if (selmon->active_tags_mask & (1U << (n - 1))) {
+				found = true;
+				break;
+			}
 		}
-
-		Arg a = {.ui = target & TAGMASK, .i = arg->i, .tc = sel};
-		tag(&a);
-		selmon->carousel_anim_dir = 0;
+		if (!found && config.tag_carousel) {
+			for (n = 32; n > (int)current; n--) {
+				if (selmon->active_tags_mask & (1U << (n - 1))) {
+					found = true;
+					break;
+				}
+			}
+		}
+		if (found) {
+			uint32_t target = 1U << (n - 1);
+			if (n > (int)current) {
+				selmon->carousel_anim_dir = -1;
+			}
+			Arg a = {.ui = target & TAGMASK, .i = arg->i, .tc = sel};
+			tag(&a);
+			selmon->carousel_anim_dir = 0;
+		}
 	}
 	return 0;
 }
@@ -1234,18 +1257,32 @@ int32_t tagtoright(const Arg *arg) {
 	Client *sel = arg->tc ? arg->tc : selmon->sel;
 	if (sel != NULL &&
 		__builtin_popcount(selmon->tagset[selmon->seltags] & TAGMASK) == 1) {
-		uint32_t target = selmon->tagset[selmon->seltags] << 1;
-
-		if (!(target & TAGMASK)) {
-			if (!config.tag_carousel)
-				return 0;
-			target = 1;
-			selmon->carousel_anim_dir = 1;
+		unsigned int current = __builtin_ctz(selmon->tagset[selmon->seltags]) + 1;
+		int n;
+		bool found = false;
+		for (n = (int)current + 1; n <= 32; n++) {
+			if (selmon->active_tags_mask & (1U << (n - 1))) {
+				found = true;
+				break;
+			}
 		}
-
-		Arg a = {.ui = target & TAGMASK, .i = arg->i, .tc = sel};
-		tag(&a);
-		selmon->carousel_anim_dir = 0;
+		if (!found && config.tag_carousel) {
+			for (n = 1; n < (int)current; n++) {
+				if (selmon->active_tags_mask & (1U << (n - 1))) {
+					found = true;
+					break;
+				}
+			}
+		}
+		if (found) {
+			uint32_t target = 1U << (n - 1);
+			if (n < (int)current) {
+				selmon->carousel_anim_dir = 1;
+			}
+			Arg a = {.ui = target & TAGMASK, .i = arg->i, .tc = sel};
+			tag(&a);
+			selmon->carousel_anim_dir = 0;
+		}
 	}
 	return 0;
 }
@@ -1261,6 +1298,8 @@ int32_t toggle_named_scratchpad(const Arg *arg) {
 	target_client = get_client_by_id_or_title(arg_id, arg_title);
 
 	if (!target_client && arg->v3) {
+		free(pending_scratchpad_mark);
+		pending_scratchpad_mark = strdup(arg_id);
 		Arg arg_spawn = {.v = arg->v3};
 		spawn_shell(&arg_spawn);
 		return 0;
@@ -1492,21 +1531,30 @@ int32_t viewtoleft(const Arg *arg) {
 	if (selmon->isoverview || selmon->pertag->curtag == 0)
 		return 0;
 
-	uint32_t target = selmon->tagset[selmon->seltags];
-	target >>= 1;
-
-	if (target == 0) {
-		if (!config.tag_carousel)
-			return 0;
-		target = (1 << (LENGTH(tags) - 1)) & TAGMASK;
-		selmon->carousel_anim_dir = -1;
+	unsigned int current = __builtin_ctz(selmon->tagset[selmon->seltags]) + 1;
+	int n;
+	bool found = false;
+	for (n = (int)current - 1; n >= 1; n--) {
+		if (selmon->active_tags_mask & (1U << (n - 1))) {
+			found = true;
+			break;
+		}
 	}
-
-	if (target == selmon->tagset[selmon->seltags])
-		return 0;
-
-	view(&(Arg){.ui = target & TAGMASK, .i = arg->i}, true);
-	selmon->carousel_anim_dir = 0;
+	if (!found && config.tag_carousel) {
+		for (n = 32; n > (int)current; n--) {
+			if (selmon->active_tags_mask & (1U << (n - 1))) {
+				found = true;
+				break;
+			}
+		}
+	}
+	if (found) {
+		if (n > (int)current) {
+			selmon->carousel_anim_dir = -1;
+		}
+		view(&(Arg){.ui = (1U << (n - 1)) & TAGMASK, .i = arg->i}, true);
+		selmon->carousel_anim_dir = 0;
+	}
 	return 0;
 }
 
@@ -1517,21 +1565,30 @@ int32_t viewtoright(const Arg *arg) {
 	if (selmon->isoverview || selmon->pertag->curtag == 0)
 		return 0;
 
-	uint32_t target = selmon->tagset[selmon->seltags];
-	target <<= 1;
-
-	if (!(target & TAGMASK)) {
-		if (!config.tag_carousel)
-			return 0;
-		target = 1;
-		selmon->carousel_anim_dir = 1;
+	unsigned int current = __builtin_ctz(selmon->tagset[selmon->seltags]) + 1;
+	int n;
+	bool found = false;
+	for (n = (int)current + 1; n <= 32; n++) {
+		if (selmon->active_tags_mask & (1U << (n - 1))) {
+			found = true;
+			break;
+		}
 	}
-
-	if (target == selmon->tagset[selmon->seltags])
-		return 0;
-
-	view(&(Arg){.ui = target & TAGMASK, .i = arg->i}, true);
-	selmon->carousel_anim_dir = 0;
+	if (!found && config.tag_carousel) {
+		for (n = 1; n < (int)current; n++) {
+			if (selmon->active_tags_mask & (1U << (n - 1))) {
+				found = true;
+				break;
+			}
+		}
+	}
+	if (found) {
+		if (n < (int)current) {
+			selmon->carousel_anim_dir = 1;
+		}
+		view(&(Arg){.ui = (1U << (n - 1)) & TAGMASK, .i = arg->i}, true);
+		selmon->carousel_anim_dir = 0;
+	}
 	return 0;
 }
 
@@ -1548,15 +1605,15 @@ int32_t viewtoleft_have_client(const Arg *arg) {
 	bool wrapped = false;
 
 	for (n = current - 1; n >= 1; n--) {
-		if (get_tag_status(n, selmon)) {
+		if ((selmon->active_tags_mask & (1U << (n - 1))) && get_tag_status(n, selmon)) {
 			found = true;
 			break;
 		}
 	}
 
 	if (!found && config.tag_carousel) {
-		for (n = LENGTH(tags); n > current; n--) {
-			if (get_tag_status(n, selmon)) {
+		for (n = 32; n > current; n--) {
+			if ((selmon->active_tags_mask & (1U << (n - 1))) && get_tag_status(n, selmon)) {
 				found = true;
 				wrapped = true;
 				break;
@@ -1585,8 +1642,8 @@ int32_t viewtoright_have_client(const Arg *arg) {
 	bool found = false;
 	bool wrapped = false;
 
-	for (n = current + 1; n <= LENGTH(tags); n++) {
-		if (get_tag_status(n, selmon)) {
+	for (n = current + 1; n <= 32; n++) {
+		if ((selmon->active_tags_mask & (1U << (n - 1))) && get_tag_status(n, selmon)) {
 			found = true;
 			break;
 		}
@@ -1594,7 +1651,7 @@ int32_t viewtoright_have_client(const Arg *arg) {
 
 	if (!found && config.tag_carousel) {
 		for (n = 1; n < current; n++) {
-			if (get_tag_status(n, selmon)) {
+			if ((selmon->active_tags_mask & (1U << (n - 1))) && get_tag_status(n, selmon)) {
 				found = true;
 				wrapped = true;
 				break;
@@ -2005,5 +2062,91 @@ int32_t focusid(const Arg *arg) {
 
 	Client *c = arg->tc;
 	client_active(c);
+	return 0;
+}
+
+int32_t add_tag(const Arg *arg) {
+	if (!selmon)
+		return 0;
+
+	int new_tag_idx = -1;
+	for (int i = 0; i < 32; i++) {
+		if (!(selmon->active_tags_mask & (1U << i))) {
+			new_tag_idx = i + 1;
+			break;
+		}
+	}
+
+	if (new_tag_idx == -1) {
+		return 0;
+	}
+
+	selmon->active_tags_mask |= (1U << (new_tag_idx - 1));
+	refresh_monitors_workspaces_status(selmon);
+	arrange(selmon, false, false);
+	printstatus(IPC_WATCH_ARRANGGE);
+	return 0;
+}
+
+int32_t remove_tag(const Arg *arg) {
+	if (!selmon)
+		return 0;
+
+	// By default, find the highest active tag to remove
+	int tag_idx = -1;
+	for (int i = 31; i >= 0; i--) {
+		if (selmon->active_tags_mask & (1U << i)) {
+			tag_idx = i + 1;
+			break;
+		}
+	}
+
+	if (tag_idx == -1)
+		return 0;
+
+	int active_count = 0;
+	for (int i = 0; i < 32; i++) {
+		if (selmon->active_tags_mask & (1U << i)) {
+			active_count++;
+		}
+	}
+	if (active_count <= 1)
+		return 0;
+
+	uint32_t tag_mask = 1U << (tag_idx - 1);
+
+	// Safe check: do not remove if it has clients
+	Client *c;
+	wl_list_for_each(c, &clients, link) {
+		if (c->mon == selmon && (c->tags & tag_mask)) {
+			return 0;
+		}
+	}
+
+	selmon->active_tags_mask &= ~tag_mask;
+
+	if (selmon->tagset[selmon->seltags] & tag_mask) {
+		selmon->tagset[selmon->seltags] &= ~tag_mask;
+		if (selmon->tagset[selmon->seltags] == 0) {
+			for (int i = 0; i < 32; i++) {
+				if (selmon->active_tags_mask & (1U << i)) {
+					view(&(Arg){.ui = 1U << i}, true);
+					break;
+				}
+			}
+		}
+	}
+	if (selmon->pertag->prevtag == tag_idx) {
+		for (int i = 0; i < 32; i++) {
+			if (selmon->active_tags_mask & (1U << i)) {
+				selmon->pertag->prevtag = i + 1;
+				break;
+			}
+		}
+	}
+
+	refresh_monitors_workspaces_status(selmon);
+	arrange(selmon, false, false);
+	printstatus(IPC_WATCH_ARRANGGE);
 	return 0;
 }

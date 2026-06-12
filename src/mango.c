@@ -125,7 +125,7 @@
 	   (C)->isunglobal)))
 #define LENGTH(X) (sizeof X / sizeof X[0])
 #define END(A) ((A) + LENGTH(A))
-#define TAGMASK ((1 << LENGTH(tags)) - 1)
+#define TAGMASK (LENGTH(tags) >= 32 ? ~0U : (1U << LENGTH(tags)) - 1)
 #define LISTEN(E, L, H) wl_signal_add((E), ((L)->notify = (H), (L)))
 #define ISFULLSCREEN(A)                                                        \
 	((A)->isfullscreen || (A)->ismaximizescreen ||                             \
@@ -353,6 +353,7 @@ struct Client {
 #endif
 	uint32_t bw;
 	uint32_t tags, oldtags, mini_restore_tag;
+	char *mark;
 	bool dirty;
 	uint32_t configure_serial;
 	struct wlr_foreign_toplevel_handle_v1 *foreign_toplevel;
@@ -563,6 +564,8 @@ struct Monitor {
 	struct wlr_ext_workspace_group_handle_v1 *ext_group;
 	bool iscleanuping;
 	int8_t carousel_anim_dir;
+	uint32_t active_tags_mask;
+	uint32_t tags_had_clients_mask;
 };
 
 typedef struct {
@@ -661,6 +664,7 @@ static void requestmonstate(struct wl_listener *listener, void *data);
 static void createlayersurface(struct wl_listener *listener, void *data);
 static void createlocksurface(struct wl_listener *listener, void *data);
 static void createmon(struct wl_listener *listener, void *data);
+static void cleanup_empty_dynamic_tags(Monitor *m);
 static void createnotify(struct wl_listener *listener, void *data);
 static void createpointer(struct wlr_pointer *pointer);
 static void configure_pointer(struct libinput_device *device);
@@ -1090,6 +1094,8 @@ static struct wlr_xwayland *xwayland;
 static struct wl_event_source *sync_keymap;
 #endif
 
+char *pending_scratchpad_mark = NULL;
+
 #include "action/client.h"
 #include "animation/client.h"
 #include "animation/common.h"
@@ -1320,7 +1326,7 @@ void swallow(Client *c, Client *w) {
 
 bool switch_scratchpad_client_state(Client *c) {
 
-	if (config.scratchpad_cross_monitor && selmon && c->mon != selmon &&
+	if ((config.scratchpad_cross_monitor || c->isnamedscratchpad) && selmon && c->mon != selmon &&
 		c->is_in_scratchpad) {
 		// 保存原始monitor用于尺寸计算
 		Monitor *oldmon = c->mon;
@@ -1607,6 +1613,14 @@ void applyrules(Client *c) {
 	if (!c)
 		return;
 
+	if (pending_scratchpad_mark) {
+		free(c->mark);
+		c->mark = pending_scratchpad_mark;
+		pending_scratchpad_mark = NULL;
+		c->isnamedscratchpad = 1;
+		c->isfloating = 1;
+	}
+
 	parent = client_get_parent(c);
 
 	Monitor *mon = parent && parent->mon ? parent->mon : selmon;
@@ -1635,6 +1649,11 @@ void applyrules(Client *c) {
 
 		// set general properties
 		apply_rule_properties(c, r);
+
+		if (r->mark) {
+			free(c->mark);
+			c->mark = strdup(r->mark);
+		}
 
 		// // set tags
 		if (r->tags > 0) {
@@ -3270,6 +3289,8 @@ void createmon(struct wl_listener *listener, void *data) {
 	m->resizing_count_pending = 0;
 	m->resizing_count_current = 0;
 	m->carousel_anim_dir = 0;
+	m->active_tags_mask = config.initial_tags_count >= 32 ? ~0U : (1U << config.initial_tags_count) - 1;
+	m->tags_had_clients_mask = 0;
 
 	m->wlr_output = wlr_output;
 	m->wlr_output->data = m;
@@ -3387,11 +3408,77 @@ void createmon(struct wl_listener *listener, void *data) {
 		ext_manager, EXT_WORKSPACE_ENABLE_CAPS);
 	wlr_ext_workspace_group_handle_v1_output_enter(m->ext_group, m->wlr_output);
 
-	for (i = 1; i <= LENGTH(tags); i++) {
-		add_workspace_by_tag(i, m);
+	for (i = 1; i <= 32; i++) {
+		if (m->active_tags_mask & (1U << (i - 1))) {
+			add_workspace_by_tag(i, m);
+		}
 	}
 
 	printstatus(IPC_WATCH_ARRANGGE);
+}
+
+static void cleanup_empty_dynamic_tags(Monitor *m) {
+	if (!config.auto_remove_empty_tags || !m || m->iscleanuping)
+		return;
+
+	m->iscleanuping = true;
+	bool changed = false;
+	for (int i = config.initial_tags_count + 1; i <= 32; i++) {
+		uint32_t tag_mask = 1U << (i - 1);
+		if (m->active_tags_mask & tag_mask) {
+			bool has_clients = false;
+			Client *c;
+			wl_list_for_each(c, &clients, link) {
+				if (c->mon == m && (c->tags & tag_mask)) {
+					has_clients = true;
+					break;
+				}
+			}
+			if (has_clients) {
+				m->tags_had_clients_mask |= tag_mask;
+			} else {
+				// If it's the selected tag and it hasn't had clients yet, don't remove it (allow the user to open the first app)
+				if ((m->tagset[m->seltags] & tag_mask) && !(m->tags_had_clients_mask & tag_mask)) {
+					continue;
+				}
+
+				m->active_tags_mask &= ~tag_mask;
+				m->tags_had_clients_mask &= ~tag_mask;
+				changed = true;
+
+				if (m->tagset[m->seltags] & tag_mask) {
+					// It was the active tag, switch to another active tag
+					uint32_t target_tag_mask = 0;
+					for (int j = 0; j < 32; j++) {
+						if (m->active_tags_mask & (1U << j)) {
+							target_tag_mask = 1U << j;
+							break;
+						}
+					}
+					if (target_tag_mask) {
+						m->iscleanuping = false;
+						view_in_mon(&(Arg){.ui = target_tag_mask}, true, m, true);
+						m->iscleanuping = true;
+					}
+				}
+
+				if (m->pertag->prevtag == i) {
+					for (int j = 0; j < 32; j++) {
+						if (m->active_tags_mask & (1U << j)) {
+							m->pertag->prevtag = j + 1;
+							break;
+						}
+					}
+				}
+			}
+		}
+	}
+	m->iscleanuping = false;
+
+	if (changed) {
+		refresh_monitors_workspaces_status(m);
+		printstatus(IPC_WATCH_ARRANGGE);
+	}
 }
 
 void // fix for 0.5
@@ -3742,6 +3829,7 @@ destroynotify(struct wl_listener *listener, void *data) {
 		wl_list_remove(&c->map.link);
 		wl_list_remove(&c->unmap.link);
 	}
+	free(c->mark);
 	free(c);
 }
 

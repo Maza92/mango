@@ -497,6 +497,7 @@ void apply_border(Client *c) {
 		if (c->border->node.enabled) {
 			wlr_scene_node_set_enabled(&c->border->node, false);
 		}
+		wlr_scene_node_set_position(&c->scene_surface->node, 0, 0);
 		return;
 	} else {
 		if (!c->border->node.enabled) {
@@ -998,6 +999,7 @@ void fadeout_client_animation_next_tick(Client *c) {
 	if (animation_passed >= 1.0) {
 		wl_list_remove(&c->fadeout_link);
 		wlr_scene_node_destroy(&c->scene->node);
+		free(c->mark);
 		free(c);
 		c = NULL;
 	}

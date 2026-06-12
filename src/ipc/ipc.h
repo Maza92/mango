@@ -82,7 +82,9 @@ static cJSON *tags_mask_to_array(uint32_t tagmask) {
 static cJSON *build_tags_json(Monitor *m) {
 	cJSON *tags_array = cJSON_CreateArray();
 	Client *c = NULL;
-	for (int tag = 1; tag <= LENGTH(tags); tag++) {
+	for (int tag = 1; tag <= 32; tag++) {
+		if (!(m->active_tags_mask & (1U << (tag - 1))))
+			continue;
 		int numclients = 0;
 		bool is_active = false, is_urgent = false;
 		uint32_t tagmask = 1 << (tag - 1);
@@ -132,7 +134,7 @@ static cJSON *monitor_active_tags(Monitor *m) {
 		return arr;
 	}
 	tagset = m->tagset[m->seltags];
-	for (int i = 0; i < LENGTH(tags); i++)
+	for (int i = 0; i < 32; i++)
 		if (tagset & (1 << i))
 			cJSON_AddItemToArray(arr, cJSON_CreateNumber(i + 1));
 	return arr;
@@ -145,6 +147,7 @@ static cJSON *build_client_json(Client *c) {
 	cJSON_AddNumberToObject(obj, "pid", c->pid);
 	cJSON_AddStringToObject(obj, "title", client_get_title(c));
 	cJSON_AddStringToObject(obj, "appid", client_get_appid(c));
+	cJSON_AddStringToObject(obj, "mark", c->mark ? c->mark : "");
 	cJSON_AddStringToObject(obj, "monitor",
 							c->mon ? c->mon->wlr_output->name : "");
 	cJSON_AddItemToObject(obj, "tags", tags_mask_to_array(c->tags));
@@ -271,6 +274,25 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 			send_static_json(client_fd, "{\"error\":\"no focused client\"}\n");
 			return;
 		}
+	} else if (strncmp(cmd, "get client_by_mark ", 19) == 0) {
+		char mark_name[256] = "";
+		if (sscanf(cmd + 19, "%255s", mark_name) != 1) {
+			send_static_json(client_fd, "{\"error\":\"usage: get client_by_mark <mark>\"}\n");
+			return;
+		}
+		Client *target = NULL;
+		Client *c = NULL;
+		wl_list_for_each(c, &clients, link) {
+			if (c->mark && strcmp(c->mark, mark_name) == 0) {
+				target = c;
+				break;
+			}
+		}
+		if (!target) {
+			send_static_json(client_fd, "{\"error\":\"client not found\"}\n");
+			return;
+		}
+		resp = build_client_json(target);
 	} else if (strncmp(cmd, "get client ", 11) == 0) {
 		Client *c = client_by_id((uint32_t)atoi(cmd + 11));
 		if (!c) {
@@ -289,7 +311,7 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 		}
 		int tag_idx = ext_tag_idx - 1;
 		Monitor *m = monitor_by_name(mon_name);
-		if (!m || tag_idx < 0 || tag_idx >= LENGTH(tags)) {
+		if (!m || tag_idx < 0 || tag_idx >= 32 || !(m->active_tags_mask & (1U << tag_idx))) {
 			send_static_json(client_fd,
 							 "{\"error\":\"invalid monitor or tag index\"}\n");
 			return;
@@ -333,6 +355,164 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 		cJSON_AddItemToObject(resp, "monitors", arr);
 	} else if (strcmp(cmd, "get all-tags") == 0) {
 		resp = build_all_tags_response();
+	} else if (strncmp(cmd, "add_tag", 7) == 0) {
+		if (!selmon) {
+			send_static_json(client_fd, "{\"error\":\"no focused monitor\"}\n");
+			return;
+		}
+
+		int new_tag_idx = -1;
+		for (int i = 0; i < 32; i++) {
+			if (!(selmon->active_tags_mask & (1U << i))) {
+				new_tag_idx = i + 1;
+				break;
+			}
+		}
+
+		if (new_tag_idx == -1) {
+			send_static_json(client_fd, "{\"error\":\"max tags limit reached\"}\n");
+			return;
+		}
+
+		char *spawn_cmd = NULL;
+		if (strlen(cmd) > 7 && cmd[7] == ' ') {
+			spawn_cmd = cmd + 8;
+			while (*spawn_cmd == ' ') {
+				spawn_cmd++;
+			}
+			if (strlen(spawn_cmd) == 0) {
+				spawn_cmd = NULL;
+			}
+		}
+
+		selmon->active_tags_mask |= (1U << (new_tag_idx - 1));
+		refresh_monitors_workspaces_status(selmon);
+
+		view(&(Arg){.ui = 1U << (new_tag_idx - 1)}, true);
+
+		arrange(selmon, false, false);
+		printstatus(IPC_WATCH_ARRANGGE);
+
+		if (spawn_cmd) {
+			spawn_shell(&(Arg){.v = spawn_cmd});
+		}
+
+		resp = cJSON_CreateObject();
+		cJSON_AddBoolToObject(resp, "success", true);
+		cJSON_AddNumberToObject(resp, "index", new_tag_idx);
+	} else if (strncmp(cmd, "remove_tag", 10) == 0) {
+		if (!selmon) {
+			send_static_json(client_fd, "{\"error\":\"no focused monitor\"}\n");
+			return;
+		}
+
+		int tag_idx = -1;
+		char force_str[32] = "";
+		bool force_kill = false;
+
+		int parsed = sscanf(cmd + 10, "%d %31s", &tag_idx, force_str);
+		if (parsed == 2) {
+			if (strcmp(force_str, "force") == 0 || strcmp(force_str, "1") == 0 || strcmp(force_str, "true") == 0) {
+				force_kill = true;
+			}
+		} else if (parsed == 1) {
+			char arg1[32] = "";
+			if (sscanf(cmd + 10, "%31s", arg1) == 1) {
+				if (strcmp(arg1, "force") == 0 || strcmp(arg1, "1") == 0 || strcmp(arg1, "true") == 0) {
+					force_kill = true;
+					tag_idx = -1;
+				}
+			}
+		}
+
+		if (tag_idx == -1) {
+			for (int i = 31; i >= 0; i--) {
+				if (selmon->active_tags_mask & (1U << i)) {
+					tag_idx = i + 1;
+					break;
+				}
+			}
+		}
+
+		if (tag_idx < 1 || tag_idx > 32 || !(selmon->active_tags_mask & (1U << (tag_idx - 1)))) {
+			send_static_json(client_fd, "{\"error\":\"invalid or inactive tag index\"}\n");
+			return;
+		}
+
+		int active_count = 0;
+		for (int i = 0; i < 32; i++) {
+			if (selmon->active_tags_mask & (1U << i)) {
+				active_count++;
+			}
+		}
+		if (active_count <= 1) {
+			send_static_json(client_fd, "{\"error\":\"cannot remove the last active tag\"}\n");
+			return;
+		}
+
+		uint32_t tag_mask = 1U << (tag_idx - 1);
+
+		bool has_clients = false;
+		Client *c;
+		wl_list_for_each(c, &clients, link) {
+			if (c->mon == selmon && (c->tags & tag_mask)) {
+				has_clients = true;
+				break;
+			}
+		}
+
+		resp = cJSON_CreateObject();
+		cJSON_AddBoolToObject(resp, "success", true);
+		cJSON_AddNumberToObject(resp, "removed_tag", tag_idx);
+		cJSON_AddNumberToObject(resp, "tag_mask", tag_mask);
+		cJSON_AddNumberToObject(resp, "active_tags_mask_before", selmon->active_tags_mask);
+
+		cJSON *killed_arr = cJSON_CreateArray();
+		if (has_clients) {
+			if (!force_kill) {
+				cJSON_Delete(resp);
+				send_static_json(client_fd, "{\"error\":\"tag has active clients\"}\n");
+				return;
+			} else {
+				Client *tmp;
+				wl_list_for_each_safe(c, tmp, &clients, link) {
+					if (c->mon == selmon && (c->tags & tag_mask)) {
+						cJSON_AddItemToArray(killed_arr, cJSON_CreateNumber(c->id));
+						killclient(&(Arg){.tc = c, .i = UNFORCE});
+					}
+				}
+			}
+		}
+		cJSON_AddItemToObject(resp, "killed_clients", killed_arr);
+
+		selmon->active_tags_mask &= ~tag_mask;
+		selmon->tags_had_clients_mask &= ~tag_mask;
+		cJSON_AddNumberToObject(resp, "active_tags_mask_after", selmon->active_tags_mask);
+
+		if (selmon->tagset[selmon->seltags] & tag_mask) {
+			selmon->tagset[selmon->seltags] &= ~tag_mask;
+			if (selmon->tagset[selmon->seltags] == 0) {
+				for (int i = 0; i < 32; i++) {
+					if (selmon->active_tags_mask & (1U << i)) {
+						view(&(Arg){.ui = 1U << i}, true);
+						break;
+					}
+				}
+			}
+		}
+
+		if (selmon->pertag->prevtag == tag_idx) {
+			for (int i = 0; i < 32; i++) {
+				if (selmon->active_tags_mask & (1U << i)) {
+					selmon->pertag->prevtag = i + 1;
+					break;
+				}
+			}
+		}
+
+		refresh_monitors_workspaces_status(selmon);
+		arrange(selmon, false, false);
+		printstatus(IPC_WATCH_ARRANGGE);
 	} else if (strncmp(cmd, "get tags ", 9) == 0) {
 		Monitor *m = monitor_by_name(cmd + 9);
 		if (!m) {
@@ -340,6 +520,27 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 			return;
 		}
 		resp = build_monitor_tags_response(m);
+	} else if (strncmp(cmd, "mark_client ", 12) == 0) {
+		uint32_t client_id = 0;
+		char mark_name[256] = "";
+		if (sscanf(cmd + 12, "%u %255s", &client_id, mark_name) != 2) {
+			send_static_json(client_fd, "{\"error\":\"usage: mark_client <id> <mark>\"}\n");
+			return;
+		}
+		Client *c = client_by_id(client_id);
+		if (!c) {
+			send_static_json(client_fd, "{\"error\":\"client not found\"}\n");
+			return;
+		}
+		free(c->mark);
+		if (strcmp(mark_name, "none") == 0) {
+			c->mark = NULL;
+		} else {
+			c->mark = strdup(mark_name);
+		}
+
+		resp = cJSON_CreateObject();
+		cJSON_AddBoolToObject(resp, "success", true);
 	} else if (strncmp(cmd, "dispatch ", 9) == 0) {
 		char *dispatch_copy = strdup(cmd_raw + 9);
 		char *out = dispatch_copy, *ptr = dispatch_copy;

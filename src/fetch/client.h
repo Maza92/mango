@@ -44,9 +44,6 @@ Client *get_client_by_id_or_title(const char *arg_id, const char *arg_title) {
 	const char *appid, *title;
 	Client *c = NULL;
 	wl_list_for_each(c, &clients, link) {
-		if (!config.scratchpad_cross_monitor && c->mon != selmon) {
-			continue;
-		}
 
 		if (c->swallowedby) {
 			appid = client_get_appid(c->swallowedby);
@@ -70,7 +67,8 @@ Client *get_client_by_id_or_title(const char *arg_id, const char *arg_title) {
 		if (arg_title && strncmp(arg_title, "none", 4) == 0)
 			arg_title = NULL;
 
-		if ((arg_title && regex_match(arg_title, title) && !arg_id) ||
+		if ((arg_id && c->mark && strcmp(c->mark, arg_id) == 0) ||
+			(arg_title && regex_match(arg_title, title) && !arg_id) ||
 			(arg_id && regex_match(arg_id, appid) && !arg_title) ||
 			(arg_id && regex_match(arg_id, appid) && arg_title &&
 			 regex_match(arg_title, title))) {

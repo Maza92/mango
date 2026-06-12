@@ -1212,6 +1212,8 @@ arrange(Monitor *m, bool want_animation, bool from_view) {
 	if (!m->wlr_output->enabled)
 		return;
 
+	cleanup_empty_dynamic_tags(m);
+
 	pre_caculate_before_arrange(m, want_animation, from_view, false);
 
 	if (m->isoverview) {
