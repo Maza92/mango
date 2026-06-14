@@ -1026,6 +1026,8 @@ FuncType parse_func_name(char *func_name, Arg *arg, char *arg_value,
 		(*arg).i = parse_circle_direction(arg_value);
 	} else if (strcmp(func_name, "toggleglobal") == 0) {
 		func = toggleglobal;
+	} else if (strcmp(func_name, "togglepinned") == 0) {
+		func = togglepinned;
 	} else if (strcmp(func_name, "toggleoverview") == 0) {
 		func = toggleoverview;
 		(*arg).i = atoi(arg_value);

@@ -1422,6 +1422,42 @@ int32_t toggleglobal(const Arg *arg) {
 	return 0;
 }
 
+int32_t togglepinned(const Arg *arg) {
+	if (!selmon)
+		return 0;
+
+	Client *c = arg->tc ? arg->tc : selmon->sel;
+	if (!c || c->isfullscreen)
+		return 0;
+
+	if (c->is_in_scratchpad) {
+		c->is_in_scratchpad = 0;
+		c->is_scratchpad_show = 0;
+		c->isnamedscratchpad = 0;
+	}
+	c->isglobal ^= 1;
+
+	if (c->isglobal) {
+		setfloating(c, 1);
+		c->focused_opacity = 0.7f;
+		c->unfocused_opacity = 0.7f;
+	} else {
+		c->focused_opacity = config.focused_opacity;
+		c->unfocused_opacity = config.unfocused_opacity;
+	}
+
+	if (c == selmon->sel) {
+		client_set_focused_opacity_animation(c);
+	} else {
+		client_set_unfocused_opacity_animation(c);
+	}
+
+	setborder_color(c);
+	arrange(selmon, false, false);
+	return 0;
+}
+
+
 int32_t togglegaps(const Arg *arg) {
 	if (!selmon)
 		return 0;
