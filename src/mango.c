@@ -393,6 +393,7 @@ struct Client {
 	int32_t iskilling;
 	int32_t istagswitching;
 	int32_t isnamedscratchpad;
+	int32_t is_tag_bound;
 	bool is_pending_open_animation;
 	bool is_restoring_from_ov;
 	float scroller_proportion;
@@ -1095,6 +1096,7 @@ static struct wl_event_source *sync_keymap;
 #endif
 
 char *pending_scratchpad_mark = NULL;
+int32_t pending_scratchpad_is_tag_bound = 0;
 
 #include "action/client.h"
 #include "animation/client.h"
@@ -1619,6 +1621,8 @@ void applyrules(Client *c) {
 		pending_scratchpad_mark = NULL;
 		c->isnamedscratchpad = 1;
 		c->isfloating = 1;
+		c->is_tag_bound = pending_scratchpad_is_tag_bound;
+		pending_scratchpad_is_tag_bound = 0;
 	}
 
 	parent = client_get_parent(c);
@@ -2331,7 +2335,13 @@ bool handle_buttonpress(struct wlr_pointer_button_event *event) {
 	switch (event->state) {
 	case WL_POINTER_BUTTON_STATE_PRESSED:
 		cursor_mode = CurPressed;
-		selmon = xytomon(cursor->x, cursor->y);
+		{
+			Monitor *old_selmon = selmon;
+			selmon = xytomon(cursor->x, cursor->y);
+			if (selmon != old_selmon) {
+				printstatus(IPC_WATCH_ARRANGGE);
+			}
+		}
 		if (locked)
 			break;
 
@@ -3442,6 +3452,24 @@ static void cleanup_empty_dynamic_tags(Monitor *m) {
 					continue;
 				}
 
+				Client *c_scr, *tmp_scr;
+				wl_list_for_each_safe(c_scr, tmp_scr, &clients, link) {
+					if (c_scr->mon == m && c_scr->is_in_scratchpad && !c_scr->is_scratchpad_show && (c_scr->mini_restore_tag & tag_mask)) {
+						if (c_scr->is_tag_bound) {
+							killclient(&(Arg){.tc = c_scr, .i = UNFORCE});
+						} else {
+							c_scr->mini_restore_tag &= ~tag_mask;
+							if (c_scr->mini_restore_tag == 0) {
+								c_scr->mini_restore_tag = m->tagset[m->seltags];
+							}
+							c_scr->oldtags &= ~tag_mask;
+							if (c_scr->oldtags == 0) {
+								c_scr->oldtags = m->tagset[m->seltags];
+							}
+						}
+					}
+				}
+
 				m->active_tags_mask &= ~tag_mask;
 				m->tags_had_clients_mask &= ~tag_mask;
 				changed = true;
@@ -4462,6 +4490,7 @@ void init_client_properties(Client *c) {
 	c->isunglobal = 0;
 	c->is_in_scratchpad = 0;
 	c->isnamedscratchpad = 0;
+	c->is_tag_bound = 0;
 	c->is_scratchpad_show = 0;
 	c->need_float_size_reduce = 0;
 	c->is_clip_to_hide = 0;
@@ -4825,8 +4854,13 @@ void motionnotify(uint32_t time, struct wlr_input_device *device, double dx,
 		wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
 		/* Update selmon (even while dragging a window) */
-		if (config.sloppyfocus)
+		if (config.sloppyfocus) {
+			Monitor *old_selmon = selmon;
 			selmon = xytomon(cursor->x, cursor->y);
+			if (selmon != old_selmon) {
+				printstatus(IPC_WATCH_ARRANGGE);
+			}
+		}
 	}
 
 	/* Find the client under the pointer and send the event along. */

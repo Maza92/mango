@@ -1300,12 +1300,16 @@ int32_t toggle_named_scratchpad(const Arg *arg) {
 	if (!target_client && arg->v3) {
 		free(pending_scratchpad_mark);
 		pending_scratchpad_mark = strdup(arg_id);
+		pending_scratchpad_is_tag_bound = (arg->i == -1) ? 0 : arg->i;
 		Arg arg_spawn = {.v = arg->v3};
 		spawn_shell(&arg_spawn);
 		return 0;
 	}
 
 	target_client->isnamedscratchpad = 1;
+	if (arg->i != -1) {
+		target_client->is_tag_bound = arg->i;
+	}
 	apply_named_scratchpad(target_client);
 	return 0;
 }

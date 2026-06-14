@@ -43,6 +43,15 @@ Client *get_client_by_id_or_title(const char *arg_id, const char *arg_title) {
 	Client *target_client = NULL;
 	const char *appid, *title;
 	Client *c = NULL;
+
+	if (arg_id && strncmp(arg_id, "none", 4) != 0) {
+		wl_list_for_each(c, &clients, link) {
+			if (c->mark && strcmp(c->mark, arg_id) == 0) {
+				return c;
+			}
+		}
+	}
+
 	wl_list_for_each(c, &clients, link) {
 
 		if (c->swallowedby) {

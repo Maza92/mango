@@ -400,6 +400,36 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 		resp = cJSON_CreateObject();
 		cJSON_AddBoolToObject(resp, "success", true);
 		cJSON_AddNumberToObject(resp, "index", new_tag_idx);
+		cJSON_AddStringToObject(resp, "monitor", selmon->wlr_output->name);
+	} else if (strncmp(cmd, "viewmon ", 8) == 0) {
+		char mon_name[256] = "";
+		int tag_idx = -1;
+		if (sscanf(cmd + 8, "%255s %d", mon_name, &tag_idx) == 2) {
+      if (tag_idx < 1 || tag_idx > 32) {
+				send_static_json(client_fd, "{\"error\":\"invalid tag index, must be between 1 and 32\"}\n");
+				return;
+			}
+			Monitor *m;
+			Monitor *target_mon = NULL;
+			wl_list_for_each(m, &mons, link) {
+				if (strcmp(m->wlr_output->name, mon_name) == 0) {
+					target_mon = m;
+					break;
+				}
+			}
+			if (target_mon) {
+				focusmon(&(Arg){.v = mon_name, .i = UNDIR});
+				view(&(Arg){.ui = 1U << (tag_idx - 1)}, true);
+				resp = cJSON_CreateObject();
+				cJSON_AddBoolToObject(resp, "success", true);
+			} else {
+				send_static_json(client_fd, "{\"error\":\"monitor not found\"}\n");
+				return;
+			}
+		} else {
+			send_static_json(client_fd, "{\"error\":\"usage: viewmon <monitor> <tag>\"}\n");
+			return;
+		}
 	} else if (strncmp(cmd, "remove_tag", 10) == 0) {
 		if (!selmon) {
 			send_static_json(client_fd, "{\"error\":\"no focused monitor\"}\n");
@@ -455,9 +485,16 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 		bool has_clients = false;
 		Client *c;
 		wl_list_for_each(c, &clients, link) {
-			if (c->mon == selmon && (c->tags & tag_mask)) {
-				has_clients = true;
-				break;
+			if (c->mon == selmon) {
+				if (c->tags & tag_mask) {
+					if (!c->is_in_scratchpad || c->is_tag_bound) {
+						has_clients = true;
+						break;
+					}
+				} else if (c->is_in_scratchpad && !c->is_scratchpad_show && c->is_tag_bound && (c->mini_restore_tag & tag_mask)) {
+					has_clients = true;
+					break;
+				}
 			}
 		}
 
@@ -476,9 +513,37 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 			} else {
 				Client *tmp;
 				wl_list_for_each_safe(c, tmp, &clients, link) {
-					if (c->mon == selmon && (c->tags & tag_mask)) {
-						cJSON_AddItemToArray(killed_arr, cJSON_CreateNumber(c->id));
-						killclient(&(Arg){.tc = c, .i = UNFORCE});
+					if (c->mon == selmon) {
+						if (c->tags & tag_mask) {
+							if (!c->is_in_scratchpad || c->is_tag_bound) {
+								cJSON_AddItemToArray(killed_arr, cJSON_CreateNumber(c->id));
+								killclient(&(Arg){.tc = c, .i = UNFORCE});
+							} else {
+								set_minimized(c);
+								c->mini_restore_tag &= ~tag_mask;
+								if (c->mini_restore_tag == 0) {
+									c->mini_restore_tag = selmon->tagset[selmon->seltags];
+								}
+								c->oldtags &= ~tag_mask;
+								if (c->oldtags == 0) {
+									c->oldtags = selmon->tagset[selmon->seltags];
+								}
+							}
+						} else if (c->is_in_scratchpad && !c->is_scratchpad_show && (c->mini_restore_tag & tag_mask)) {
+							if (c->is_tag_bound) {
+								cJSON_AddItemToArray(killed_arr, cJSON_CreateNumber(c->id));
+								killclient(&(Arg){.tc = c, .i = UNFORCE});
+							} else {
+								c->mini_restore_tag &= ~tag_mask;
+								if (c->mini_restore_tag == 0) {
+									c->mini_restore_tag = selmon->tagset[selmon->seltags];
+								}
+								c->oldtags &= ~tag_mask;
+								if (c->oldtags == 0) {
+									c->oldtags = selmon->tagset[selmon->seltags];
+								}
+							}
+						}
 					}
 				}
 			}
