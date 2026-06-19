@@ -598,6 +598,15 @@ void apply_border(Client *c) {
 	wlr_scene_rect_set_corner_radius(c->border, config.border_radius,
 									 current_corner_location);
 	wlr_scene_rect_set_clipped_region(c->border, clipped_region);
+
+	if (c->dim_rect) {
+		int32_t dim_width = GEZERO(inner_surface_width);
+		int32_t dim_height = GEZERO(inner_surface_height);
+		wlr_scene_rect_set_size(c->dim_rect, dim_width, dim_height);
+		wlr_scene_node_set_position(&c->dim_rect->node, inner_surface_x, inner_surface_y);
+		int32_t radius = (dim_width >= 2 * config.border_radius && dim_height >= 2 * config.border_radius) ? config.border_radius : 0;
+		wlr_scene_rect_set_corner_radius(c->dim_rect, radius, current_corner_location);
+	}
 }
 
 struct ivec2 clip_to_hide(Client *c, struct wlr_box *clip_box) {
@@ -1395,11 +1404,13 @@ void client_set_focused_opacity_animation(Client *c) {
 	memcpy(c->opacity_animation.target_border_color, border_color,
 		   sizeof(c->opacity_animation.target_border_color));
 	c->opacity_animation.target_opacity = c->focused_opacity;
+	c->opacity_animation.target_dim = 0.0f;
 	c->opacity_animation.time_started = get_now_in_ms();
 	memcpy(c->opacity_animation.initial_border_color,
 		   c->opacity_animation.current_border_color,
 		   sizeof(c->opacity_animation.initial_border_color));
 	c->opacity_animation.initial_opacity = c->opacity_animation.current_opacity;
+	c->opacity_animation.initial_dim = c->opacity_animation.current_dim;
 
 	c->opacity_animation.running = true;
 }
@@ -1417,12 +1428,14 @@ void client_set_unfocused_opacity_animation(Client *c) {
 		   sizeof(c->opacity_animation.target_border_color));
 	// Start opacity animation to unfocused
 	c->opacity_animation.target_opacity = c->unfocused_opacity;
+	c->opacity_animation.target_dim = c->unfocused_dim;
 	c->opacity_animation.time_started = get_now_in_ms();
 
 	memcpy(c->opacity_animation.initial_border_color,
 		   c->opacity_animation.current_border_color,
 		   sizeof(c->opacity_animation.initial_border_color));
 	c->opacity_animation.initial_opacity = c->opacity_animation.current_opacity;
+	c->opacity_animation.initial_dim = c->opacity_animation.current_dim;
 
 	c->opacity_animation.running = true;
 }
@@ -1433,6 +1446,10 @@ bool client_apply_focus_opacity(Client *c) {
 	if (c->isfullscreen) {
 		c->opacity_animation.running = false;
 		client_set_opacity(c, 1);
+		if (c->dim_rect) {
+			wlr_scene_rect_set_color(c->dim_rect, (float[]){0.0f, 0.0f, 0.0f, 0.0f});
+			wlr_scene_node_set_enabled(&c->dim_rect->node, false);
+		}
 	} else if (c->animation.running && c->animation.action == OPEN) {
 		c->opacity_animation.running = false;
 		struct timespec now;
@@ -1464,6 +1481,12 @@ bool client_apply_focus_opacity(Client *c) {
 		c->opacity_animation.current_opacity = target_opacity;
 		client_set_opacity(c, target_opacity);
 		client_set_border_color(c, c->opacity_animation.target_border_color);
+
+		float target_dim = (c == selmon->sel) ? 0.0f : c->unfocused_dim;
+		if (c->dim_rect) {
+			wlr_scene_rect_set_color(c->dim_rect, (float[]){0.0f, 0.0f, 0.0f, target_dim});
+			wlr_scene_node_set_enabled(&c->dim_rect->node, target_dim > 0.0f);
+		}
 	} else if (config.animations && c->opacity_animation.running) {
 
 		struct timespec now;
@@ -1485,6 +1508,16 @@ bool client_apply_focus_opacity(Client *c) {
 				eased_progress;
 		client_set_opacity(c, c->opacity_animation.current_opacity);
 
+		c->opacity_animation.current_dim =
+			c->opacity_animation.initial_dim +
+			(c->opacity_animation.target_dim -
+			 c->opacity_animation.initial_dim) *
+				eased_progress;
+		if (c->dim_rect) {
+			wlr_scene_rect_set_color(c->dim_rect, (float[]){0.0f, 0.0f, 0.0f, c->opacity_animation.current_dim});
+			wlr_scene_node_set_enabled(&c->dim_rect->node, c->opacity_animation.current_dim > 0.0f);
+		}
+
 		// Animate border color
 		for (int32_t i = 0; i < 4; i++) {
 			c->opacity_animation.current_border_color[i] =
@@ -1502,15 +1535,25 @@ bool client_apply_focus_opacity(Client *c) {
 	} else if (c == selmon->sel) {
 		c->opacity_animation.running = false;
 		c->opacity_animation.current_opacity = c->focused_opacity;
+		c->opacity_animation.current_dim = 0.0f;
 		memcpy(c->opacity_animation.current_border_color, border_color,
 			   sizeof(c->opacity_animation.current_border_color));
 		client_set_opacity(c, c->focused_opacity);
+		if (c->dim_rect) {
+			wlr_scene_rect_set_color(c->dim_rect, (float[]){0.0f, 0.0f, 0.0f, 0.0f});
+			wlr_scene_node_set_enabled(&c->dim_rect->node, false);
+		}
 	} else {
 		c->opacity_animation.running = false;
 		c->opacity_animation.current_opacity = c->unfocused_opacity;
+		c->opacity_animation.current_dim = c->unfocused_dim;
 		memcpy(c->opacity_animation.current_border_color, border_color,
 			   sizeof(c->opacity_animation.current_border_color));
 		client_set_opacity(c, c->unfocused_opacity);
+		if (c->dim_rect) {
+			wlr_scene_rect_set_color(c->dim_rect, (float[]){0.0f, 0.0f, 0.0f, c->unfocused_dim});
+			wlr_scene_node_set_enabled(&c->dim_rect->node, c->unfocused_dim > 0.0f);
+		}
 	}
 
 	return false;

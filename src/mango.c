@@ -302,6 +302,9 @@ struct dwl_opacity_animation {
 	float current_border_color[4];
 	float target_border_color[4];
 	float initial_border_color[4];
+	float current_dim;
+	float target_dim;
+	float initial_dim;
 };
 
 typedef struct {
@@ -323,6 +326,7 @@ struct Client {
 	struct wlr_scene_tree *scene;
 	struct wlr_scene_rect *border; /* top, bottom, left, right */
 	struct wlr_scene_rect *droparea;
+	struct wlr_scene_rect *dim_rect;
 	struct wlr_scene_rect *splitindicator[4];
 	struct wlr_scene_shadow *shadow;
 	struct wlr_scene_tree *scene_surface;
@@ -419,6 +423,7 @@ struct Client {
 	int32_t isunglobal;
 	float focused_opacity;
 	float unfocused_opacity;
+	float unfocused_dim;
 	char oldmonname[128];
 	int32_t noblur;
 	double master_mfact_per, master_inner_per, stack_inner_per;
@@ -1538,6 +1543,8 @@ static void apply_rule_properties(Client *c, const ConfigWinRule *r) {
 	APPLY_FLOAT_PROP(c, r, scroller_proportion_single);
 	APPLY_FLOAT_PROP(c, r, focused_opacity);
 	APPLY_FLOAT_PROP(c, r, unfocused_opacity);
+	if (r->unfocused_dim >= 0.0f)
+		c->unfocused_dim = r->unfocused_dim;
 
 	APPLY_STRING_PROP(c, r, animation_type_open);
 	APPLY_STRING_PROP(c, r, animation_type_close);
@@ -1648,7 +1655,7 @@ void applyrules(Client *c) {
 		r = &config.window_rules[i];
 
 		// rule matching
-		if (!is_window_rule_matches(r, appid, title))
+		if (!is_window_rule_matches(r, appid, title, c->mark))
 			continue;
 
 		// set general properties
@@ -1801,7 +1808,7 @@ void applyrules(Client *c) {
 	}
 
 	// apply overlay rule
-	if (c->isoverlay && c->scene) {
+	if ((c->isoverlay || (c->isglobal && c->isfloating)) && c->scene) {
 		wlr_scene_node_reparent(&c->scene->node, layers[LyrOverlay]);
 		wlr_scene_node_raise_to_top(&c->scene->node);
 	}
@@ -3439,7 +3446,7 @@ static void cleanup_empty_dynamic_tags(Monitor *m) {
 			bool has_clients = false;
 			Client *c;
 			wl_list_for_each(c, &clients, link) {
-				if (c->mon == m && (c->tags & tag_mask)) {
+				if (c->mon == m && !c->isglobal && !c->is_in_scratchpad && (c->tags & tag_mask)) {
 					has_clients = true;
 					break;
 				}
@@ -3454,10 +3461,15 @@ static void cleanup_empty_dynamic_tags(Monitor *m) {
 
 				Client *c_scr, *tmp_scr;
 				wl_list_for_each_safe(c_scr, tmp_scr, &clients, link) {
-					if (c_scr->mon == m && c_scr->is_in_scratchpad && !c_scr->is_scratchpad_show && (c_scr->mini_restore_tag & tag_mask)) {
+					if (c_scr->mon == m && c_scr->is_in_scratchpad &&
+						((!c_scr->is_scratchpad_show && (c_scr->mini_restore_tag & tag_mask)) ||
+						 (c_scr->is_scratchpad_show && (c_scr->tags & tag_mask)))) {
 						if (c_scr->is_tag_bound) {
 							killclient(&(Arg){.tc = c_scr, .i = UNFORCE});
 						} else {
+							if (c_scr->is_scratchpad_show) {
+								set_minimized(c_scr);
+							}
 							c_scr->mini_restore_tag &= ~tag_mask;
 							if (c_scr->mini_restore_tag == 0) {
 								c_scr->mini_restore_tag = m->tagset[m->seltags];
@@ -4504,6 +4516,7 @@ void init_client_properties(Client *c) {
 	c->fake_no_border = false;
 	c->focused_opacity = config.focused_opacity;
 	c->unfocused_opacity = config.unfocused_opacity;
+	c->unfocused_dim = config.unfocused_dim;
 	c->nofocus = 0;
 	c->nofadein = 0;
 	c->nofadeout = 0;
@@ -4542,6 +4555,8 @@ void init_client_properties(Client *c) {
 		   sizeof(c->opacity_animation.current_border_color));
 	c->opacity_animation.initial_opacity = c->unfocused_opacity;
 	c->opacity_animation.current_opacity = c->unfocused_opacity;
+	c->opacity_animation.initial_dim = c->unfocused_dim;
+	c->opacity_animation.current_dim = c->unfocused_dim;
 }
 
 void // old fix to 0.5
@@ -4561,6 +4576,9 @@ mapnotify(struct wl_listener *listener, void *data) {
 			? wlr_scene_xdg_surface_create(c->scene, c->surface.xdg)
 			: wlr_scene_subsurface_tree_create(c->scene, client_surface(c));
 	c->scene->node.data = c->scene_surface->node.data = c;
+
+	c->dim_rect = wlr_scene_rect_create(c->scene, 0, 0, (float[]){0.0f, 0.0f, 0.0f, 0.0f});
+	wlr_scene_node_set_enabled(&c->dim_rect->node, false);
 
 	client_get_geometry(c, &c->geom);
 
@@ -5511,7 +5529,7 @@ setfloating(Client *c, int32_t floating) {
 		}
 	}
 
-	if (c->isoverlay) {
+	if (c->isoverlay || (c->isglobal && c->isfloating)) {
 		wlr_scene_node_reparent(&c->scene->node, layers[LyrOverlay]);
 	} else if (client_should_overtop(c) && c->isfloating) {
 		wlr_scene_node_reparent(&c->scene->node, layers[LyrTop]);
@@ -5596,8 +5614,12 @@ void setmaximizescreen(Client *c, int32_t maximizescreen) {
 			setfloating(c, 1);
 	}
 
-	wlr_scene_node_reparent(&c->scene->node,
-							layers[c->isfloating ? LyrTop : LyrTile]);
+	if (c->isoverlay || (c->isglobal && c->isfloating)) {
+		wlr_scene_node_reparent(&c->scene->node, layers[LyrOverlay]);
+	} else {
+		wlr_scene_node_reparent(&c->scene->node,
+								layers[c->isfloating ? LyrTop : LyrTile]);
+	}
 
 	if (!c->force_fakemaximize && !c->ismaximizescreen) {
 		client_set_maximized(c, false);
@@ -5655,7 +5677,7 @@ void setfullscreen(Client *c, int32_t fullscreen) // 用自定义全屏代理自
 			setfloating(c, 1);
 	}
 
-	if (c->isoverlay) {
+	if (c->isoverlay || (c->isglobal && c->isfloating)) {
 		wlr_scene_node_reparent(&c->scene->node, layers[LyrOverlay]);
 	} else if (client_should_overtop(c) && c->isfloating) {
 		wlr_scene_node_reparent(&c->scene->node, layers[LyrTop]);

@@ -1438,12 +1438,38 @@ int32_t togglepinned(const Arg *arg) {
 	c->isglobal ^= 1;
 
 	if (c->isglobal) {
+		c->animation.tagouting = false;
+		c->animation.tagouted = false;
+		c->animation.tagining = false;
+		if (c->scene) {
+			wlr_scene_node_set_enabled(&c->scene->node, true);
+		}
 		setfloating(c, 1);
 		c->focused_opacity = 0.7f;
 		c->unfocused_opacity = 0.7f;
+
+		// Calculate gap offsets
+		int32_t gap_oh = enablegaps ? c->mon->gappoh : 0;
+		int32_t gap_ov = enablegaps ? c->mon->gappov : 0;
+
+		// Make the window 30% of the monitor usable area (PiP mode)
+		int32_t pip_w = c->mon->w.width * 0.30;
+		int32_t pip_h = c->mon->w.height * 0.30;
+		int32_t pip_x = c->mon->w.x + c->mon->w.width - pip_w - gap_oh;
+		int32_t pip_y = c->mon->w.y + c->mon->w.height - pip_h - gap_ov;
+
+		struct wlr_box pip_geom = {
+			.x = pip_x,
+			.y = pip_y,
+			.width = pip_w,
+			.height = pip_h
+		};
+		c->float_geom = pip_geom;
+		resize(c, pip_geom, 0);
 	} else {
 		c->focused_opacity = config.focused_opacity;
 		c->unfocused_opacity = config.unfocused_opacity;
+		setfloating(c, 0);
 	}
 
 	if (c == selmon->sel) {
@@ -1499,7 +1525,7 @@ int32_t toggleoverlay(const Arg *arg) {
 
 	c->isoverlay ^= 1;
 
-	if (c->isoverlay) {
+	if (c->isoverlay || (c->isglobal && c->isfloating)) {
 		wlr_scene_node_reparent(&c->scene->node, layers[LyrOverlay]);
 		wlr_scene_node_raise_to_top(&c->scene->node);
 	} else if (client_should_overtop(c) && c->isfloating) {

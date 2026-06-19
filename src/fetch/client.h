@@ -142,7 +142,10 @@ setclient_coordinate_center(Client *c, Monitor *tm, struct wlr_box geom,
 }
 /* Helper: Check if rule matches client */
 static bool is_window_rule_matches(const ConfigWinRule *r, const char *appid,
-								   const char *title) {
+								   const char *title, const char *mark) {
+	if (r->mark && mark && strcmp(r->mark, mark) == 0) {
+		return true;
+	}
 	return (r->title && regex_match(r->title, title) && !r->id) ||
 		   (r->id && regex_match(r->id, appid) && !r->title) ||
 		   (r->id && regex_match(r->id, appid) && r->title &&
@@ -480,6 +483,14 @@ Client *direction_select(const Arg *arg) {
  * only return that client */
 Client *focustop(Monitor *m) {
 	Client *c = NULL;
+	// First pass: try to find a visible client that is NOT global (pinned)
+	wl_list_for_each(c, &fstack, flink) {
+		if (c->iskilling || c->isunglobal || c->isglobal)
+			continue;
+		if (VISIBLEON(c, m))
+			return c;
+	}
+	// Second pass: fallback to any visible client (including global/pinned ones)
 	wl_list_for_each(c, &fstack, flink) {
 		if (c->iskilling || c->isunglobal)
 			continue;

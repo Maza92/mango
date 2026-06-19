@@ -98,6 +98,7 @@ typedef struct {
 	int32_t noblur;
 	float focused_opacity;
 	float unfocused_opacity;
+	float unfocused_dim;
 	float scroller_proportion_single;
 	uint32_t passmod;
 	xkb_keysym_t keysym;
@@ -232,6 +233,7 @@ typedef struct {
 	uint32_t swipe_min_threshold;
 	float focused_opacity;
 	float unfocused_opacity;
+	float unfocused_dim;
 	float *scroller_proportion_preset;
 	int32_t scroller_proportion_preset_count;
 
@@ -1534,6 +1536,8 @@ bool parse_option(Config *config, char *key, char *value) {
 		config->focused_opacity = atof(value);
 	} else if (strcmp(key, "unfocused_opacity") == 0) {
 		config->unfocused_opacity = atof(value);
+	} else if (strcmp(key, "unfocused_dim") == 0) {
+		config->unfocused_dim = atof(value);
 	} else if (strcmp(key, "xkb_rules_rules") == 0) {
 		strncpy(config->xkb_rules_rules, value,
 				sizeof(config->xkb_rules_rules) - 1);
@@ -2221,6 +2225,7 @@ bool parse_option(Config *config, char *key, char *value) {
 		// float rule value, relay to a client property
 		rule->focused_opacity = 0;
 		rule->unfocused_opacity = 0;
+		rule->unfocused_dim = -1.0f;
 		rule->scroller_proportion_single = 0.0f;
 		rule->scroller_proportion = 0;
 
@@ -2305,6 +2310,8 @@ bool parse_option(Config *config, char *key, char *value) {
 					rule->unfocused_opacity = atof(val);
 				} else if (strcmp(key, "focused_opacity") == 0) {
 					rule->focused_opacity = atof(val);
+				} else if (strcmp(key, "unfocused_dim") == 0) {
+					rule->unfocused_dim = atof(val);
 				} else if (strcmp(key, "isoverlay") == 0) {
 					rule->isoverlay = atoi(val);
 				} else if (strcmp(key, "allow_shortcuts_inhibit") == 0) {
@@ -3440,6 +3447,7 @@ void override_config(void) {
 	config.focused_opacity = CLAMP_FLOAT(config.focused_opacity, 0.0f, 1.0f);
 	config.unfocused_opacity =
 		CLAMP_FLOAT(config.unfocused_opacity, 0.0f, 1.0f);
+	config.unfocused_dim = CLAMP_FLOAT(config.unfocused_dim, 0.0f, 1.0f);
 }
 
 void set_value_default() {
@@ -3582,6 +3590,7 @@ void set_value_default() {
 	config.shadows_position_y = 0;
 	config.focused_opacity = 1.0f;
 	config.unfocused_opacity = 1.0f;
+	config.unfocused_dim = 0.0f;
 
 	config.shadowscolor[0] = 0.0f;
 	config.shadowscolor[1] = 0.0f;
