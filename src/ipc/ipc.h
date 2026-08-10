@@ -87,6 +87,9 @@ static cJSON *build_tags_json(Monitor *m) {
 			continue;
 		int numclients = 0;
 		bool is_active = false, is_urgent = false;
+		bool is_migrated = false;
+		const char *source_monitor = "";
+		int source_tag = 0;
 		uint32_t tagmask = 1 << (tag - 1);
 		if (tagmask & m->tagset[m->seltags])
 			is_active = true;
@@ -97,12 +100,22 @@ static cJSON *build_tags_json(Monitor *m) {
 				continue;
 			if (c->isurgent)
 				is_urgent = true;
+			if (c->oldmonname[0] != '\0') {
+				is_migrated = true;
+				source_monitor = c->oldmonname;
+				if (c->oldmon_tags) {
+					source_tag = get_tags_first_tag_num(c->oldmon_tags);
+				}
+			}
 			numclients++;
 		}
 		cJSON *tag_obj = cJSON_CreateObject();
 		cJSON_AddNumberToObject(tag_obj, "index", tag);
 		cJSON_AddBoolToObject(tag_obj, "is_active", is_active);
 		cJSON_AddBoolToObject(tag_obj, "is_urgent", is_urgent);
+		cJSON_AddBoolToObject(tag_obj, "is_migrated", is_migrated);
+		cJSON_AddStringToObject(tag_obj, "source_monitor", source_monitor);
+		cJSON_AddNumberToObject(tag_obj, "source_tag", source_tag);
 		cJSON_AddStringToObject(tag_obj, "layout",
 								m->pertag->ltidxs[tag]->symbol);
 		cJSON_AddNumberToObject(tag_obj, "client_count", numclients);
@@ -163,6 +176,9 @@ static cJSON *build_client_json(Client *c) {
 	cJSON_AddBoolToObject(obj, "is_urgent", c->isurgent);
 	cJSON_AddBoolToObject(obj, "is_scratchpad", c->is_in_scratchpad);
 	cJSON_AddBoolToObject(obj, "is_namedscratchpad", c->isnamedscratchpad);
+	cJSON_AddBoolToObject(obj, "is_migrated", c->oldmonname[0] != '\0');
+	cJSON_AddStringToObject(obj, "source_monitor", c->oldmonname);
+	cJSON_AddItemToObject(obj, "source_tags", tags_mask_to_array(c->oldmon_tags));
 	cJSON_AddNumberToObject(obj, "x", c->geom.x);
 	cJSON_AddNumberToObject(obj, "y", c->geom.y);
 	cJSON_AddNumberToObject(obj, "width", c->geom.width);
@@ -401,6 +417,133 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 		cJSON_AddBoolToObject(resp, "success", true);
 		cJSON_AddNumberToObject(resp, "index", new_tag_idx);
 		cJSON_AddStringToObject(resp, "monitor", selmon->wlr_output->name);
+	} else if (strncmp(cmd, "move_tag ", 9) == 0) {
+		int tag_idx = -1;
+		char dest_mon_name[256] = "";
+
+		if (sscanf(cmd + 9, "%d %255s", &tag_idx, dest_mon_name) != 2) {
+			send_static_json(client_fd, "{\"error\":\"usage: move_tag <tag_index> <destination_monitor>\"}\n");
+			return;
+		}
+
+		if (tag_idx <= config.initial_tags_count || tag_idx > 32) {
+			char err_msg[256];
+			snprintf(err_msg, sizeof(err_msg), "{\"error\":\"tag index must be a dynamic tag (greater than %d and <= 32)\"}\n", config.initial_tags_count);
+			send_static_json(client_fd, err_msg);
+			return;
+		}
+
+		// 1. Buscar monitor destino
+		Monitor *dest_mon = NULL;
+		Monitor *m;
+		wl_list_for_each(m, &mons, link) {
+			if (strcmp(m->wlr_output->name, dest_mon_name) == 0) {
+				dest_mon = m;
+				break;
+			}
+		}
+		if (!dest_mon || !dest_mon->wlr_output->enabled) {
+			send_static_json(client_fd, "{\"error\":\"destination monitor not found or disabled\"}\n");
+			return;
+		}
+
+		// 2. Buscar monitor origen que tenga activo ese tag
+		Monitor *src_mon = NULL;
+		wl_list_for_each(m, &mons, link) {
+			if (m->wlr_output->enabled && (m->active_tags_mask & (1U << (tag_idx - 1)))) {
+				src_mon = m;
+				break;
+			}
+		}
+		if (!src_mon) {
+			send_static_json(client_fd, "{\"error\":\"tag index is not active on any monitor\"}\n");
+			return;
+		}
+
+		if (src_mon == dest_mon) {
+			send_static_json(client_fd, "{\"error\":\"tag is already on the destination monitor\"}\n");
+			return;
+		}
+
+		// 3. Determinar tag de destino en dest_mon
+		uint32_t src_tag_mask = 1U << (tag_idx - 1);
+		uint32_t dest_tag_mask = 0;
+		int dest_tag_idx = -1;
+
+		if (!(dest_mon->active_tags_mask & src_tag_mask)) {
+			dest_tag_mask = src_tag_mask;
+			dest_tag_idx = tag_idx;
+		} else {
+			for (int i = config.initial_tags_count; i < 32; i++) {
+				uint32_t candidate_mask = 1U << i;
+				if (!(dest_mon->active_tags_mask & candidate_mask)) {
+					dest_tag_mask = candidate_mask;
+					dest_tag_idx = i + 1;
+					break;
+				}
+			}
+		}
+
+		if (dest_tag_mask == 0) {
+			send_static_json(client_fd, "{\"error\":\"no free dynamic tags available on destination monitor\"}\n");
+			return;
+		}
+
+		// 4. Mover clientes del tag en src_mon al dest_mon
+		dest_mon->active_tags_mask |= dest_tag_mask;
+		is_migration_active = true;
+
+		Client *c;
+		wl_list_for_each(c, &clients, link) {
+			if (c->mon == src_mon) {
+				bool is_target = false;
+				if (!c->is_in_scratchpad && (c->tags & src_tag_mask)) {
+					is_target = true;
+				} else if (c->is_in_scratchpad && c->is_tag_bound) {
+					if ((c->is_scratchpad_show && (c->tags & src_tag_mask)) ||
+						(!c->is_scratchpad_show && (c->mini_restore_tag & src_tag_mask))) {
+						is_target = true;
+					}
+				}
+
+				if (is_target) {
+					// Guardar historial para reporte de migración
+					memset(c->oldmonname, 0, sizeof(c->oldmonname));
+					strncpy(c->oldmonname, src_mon->wlr_output->name, sizeof(c->oldmonname) - 1);
+					c->oldmon_tags = src_tag_mask;
+
+					// Si es un scratchpad, actualizar su tag atado al nuevo tag de destino y recalcular coordenadas
+					if (c->is_in_scratchpad) {
+						if (c->is_scratchpad_show) {
+							c->tags = dest_tag_mask;
+						} else {
+							c->mini_restore_tag = dest_tag_mask;
+							c->oldtags = dest_tag_mask;
+						}
+						c->float_geom.width = (int32_t)(c->float_geom.width * dest_mon->w.width / src_mon->w.width);
+						c->float_geom.height = (int32_t)(c->float_geom.height * dest_mon->w.height / src_mon->w.height);
+						c->float_geom = c->geom = setclient_coordinate_center(c, dest_mon, c->float_geom, 0, 0);
+					}
+
+					// Cambiar de monitor
+					setmon(c, dest_mon, dest_tag_mask, true);
+				}
+			}
+		}
+
+		// 5. Limpieza y refresco
+		is_migration_active = false;
+		cleanup_empty_dynamic_tags(src_mon);
+		arrange(src_mon, false, false);
+		arrange(dest_mon, false, false);
+		printstatus(IPC_WATCH_ARRANGGE);
+
+		resp = cJSON_CreateObject();
+		cJSON_AddBoolToObject(resp, "success", true);
+		cJSON_AddStringToObject(resp, "source_monitor", src_mon->wlr_output->name);
+		cJSON_AddStringToObject(resp, "destination_monitor", dest_mon->wlr_output->name);
+		cJSON_AddNumberToObject(resp, "source_tag", tag_idx);
+		cJSON_AddNumberToObject(resp, "destination_tag", dest_tag_idx);
 	} else if (strncmp(cmd, "viewmon ", 8) == 0) {
 		char mon_name[256] = "";
 		int tag_idx = -1;

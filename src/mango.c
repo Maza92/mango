@@ -356,7 +356,7 @@ struct Client {
 	struct wl_listener commmitx11;
 #endif
 	uint32_t bw;
-	uint32_t tags, oldtags, mini_restore_tag;
+	uint32_t tags, oldtags, mini_restore_tag, oldmon_tags;
 	char *mark;
 	bool dirty;
 	uint32_t configure_serial;
@@ -937,6 +937,7 @@ static struct wlr_idle_notifier_v1 *idle_notifier;
 static struct wlr_idle_inhibit_manager_v1 *idle_inhibit_mgr;
 static struct wlr_layer_shell_v1 *layer_shell;
 static struct wlr_output_manager_v1 *output_mgr;
+static bool is_migration_active = false;
 static struct wlr_virtual_keyboard_manager_v1 *virtual_keyboard_mgr;
 static struct wlr_keyboard_shortcuts_inhibit_manager_v1
 	*keyboard_shortcuts_inhibit;
@@ -1592,6 +1593,10 @@ void set_float_malposition(Client *tc) {
 }
 
 void client_reset_mon_tags(Client *c, Monitor *mon, uint32_t newtags) {
+	if (c->isminimized) {
+		c->tags = 0;
+		return;
+	}
 	if (!newtags && mon && !mon->isoverview) {
 		c->tags = mon->tagset[mon->seltags];
 	} else if (!newtags && mon && mon->isoverview) {
@@ -2633,6 +2638,9 @@ void closemon(Monitor *m) {
 	 * move closed monitor's clients to the focused one */
 	Client *c = NULL;
 	int32_t i = 0, nmons = wl_list_length(&mons);
+	uint32_t tag_mapping[32] = {0};
+	is_migration_active = true;
+
 	if (!nmons) {
 		selmon = NULL;
 	} else if (m == selmon) {
@@ -2646,6 +2654,7 @@ void closemon(Monitor *m) {
 
 	wl_list_for_each(c, &clients, link) {
 		if (c->mon == m) {
+			c->oldmon_tags = c->tags;
 
 			if (selmon == NULL) {
 				if (c->foreign_toplevel) {
@@ -2657,6 +2666,65 @@ void closemon(Monitor *m) {
 
 				c->mon = NULL;
 			} else {
+				// Reasignar tags dinámicos si están ocupados en selmon
+				uint32_t newtags = 0;
+				uint32_t oldtags = (c->is_in_scratchpad && !c->is_scratchpad_show) ? c->mini_restore_tag : c->tags;
+
+				for (int bit = 0; bit < 32; bit++) {
+					uint32_t bit_mask = 1U << bit;
+					if (oldtags & bit_mask) {
+						int tag_num = bit + 1;
+						if (tag_num > config.initial_tags_count) {
+							if (selmon->active_tags_mask & bit_mask) {
+								if (tag_mapping[bit] != 0) {
+									newtags |= tag_mapping[bit];
+								} else {
+									uint32_t free_tag_mask = 0;
+									for (int free_bit = config.initial_tags_count; free_bit < 32; free_bit++) {
+										uint32_t candidate_mask = 1U << free_bit;
+										bool mapping_taken = false;
+										for (int k = 0; k < 32; k++) {
+											if (tag_mapping[k] == candidate_mask) {
+												mapping_taken = true;
+												break;
+											}
+										}
+										if (!(selmon->active_tags_mask & candidate_mask) && !mapping_taken) {
+											free_tag_mask = candidate_mask;
+											break;
+										}
+									}
+									if (free_tag_mask != 0) {
+										tag_mapping[bit] = free_tag_mask;
+										newtags |= free_tag_mask;
+										selmon->active_tags_mask |= free_tag_mask;
+									} else {
+										newtags |= bit_mask;
+									}
+								}
+							} else {
+								newtags |= bit_mask;
+								selmon->active_tags_mask |= bit_mask;
+							}
+						} else {
+							newtags |= bit_mask;
+						}
+					}
+				}
+
+				if (newtags != 0) {
+					if (c->is_in_scratchpad && !c->is_scratchpad_show) {
+						c->mini_restore_tag = newtags;
+						c->oldtags = newtags;
+						// Recalcular y centrar coordenadas en selmon
+						c->float_geom.width = (int32_t)(c->float_geom.width * selmon->w.width / m->w.width);
+						c->float_geom.height = (int32_t)(c->float_geom.height * selmon->w.height / m->w.height);
+						c->float_geom = c->geom = setclient_coordinate_center(c, selmon, c->float_geom, 0, 0);
+					} else {
+						c->tags = newtags;
+					}
+				}
+
 				client_change_mon(c, selmon);
 			}
 			// record the oldmonname which is used to restore
@@ -2669,6 +2737,7 @@ void closemon(Monitor *m) {
 		focusclient(focustop(selmon), 1);
 		printstatus(IPC_WATCH_ARRANGGE);
 	}
+	is_migration_active = false;
 }
 
 static void iter_layer_scene_buffers(struct wlr_scene_buffer *buffer,
@@ -3435,7 +3504,7 @@ void createmon(struct wl_listener *listener, void *data) {
 }
 
 static void cleanup_empty_dynamic_tags(Monitor *m) {
-	if (!config.auto_remove_empty_tags || !m || m->iscleanuping)
+	if (is_migration_active || !config.auto_remove_empty_tags || !m || m->iscleanuping)
 		return;
 
 	m->iscleanuping = true;
@@ -5814,6 +5883,9 @@ void setmon(Client *c, Monitor *m, uint32_t newtags, bool focus) {
 		reset_foreign_tolevel(c, oldmon, m);
 		resize(c, c->geom, 0);
 		client_reset_mon_tags(c, m, newtags);
+		if (!c->is_in_scratchpad && !c->isminimized && c->tags) {
+			m->active_tags_mask |= c->tags;
+		}
 		check_match_tag_floating_rule(c, m);
 		setfloating(c, c->isfloating);
 		setfullscreen(c, c->isfullscreen); /* This will call arrange(c->mon) */
@@ -6701,7 +6773,23 @@ void updatemons(struct wl_listener *listener, void *data) {
 			// restore window to old monitor
 			if (c->mon && c->mon != m && client_surface(c)->mapped &&
 				strcmp(c->oldmonname, m->wlr_output->name) == 0) {
-				client_change_mon(c, m);
+				uint32_t original_tags = c->oldmon_tags ? c->oldmon_tags : c->tags;
+				bool is_dynamic = false;
+				for (int bit = 0; bit < 32; bit++) {
+					if (original_tags & (1U << bit)) {
+						if ((bit + 1) > config.initial_tags_count) {
+							is_dynamic = true;
+							break;
+						}
+					}
+				}
+				if (!is_dynamic) {
+					if (c->oldmon_tags) {
+						c->tags = c->oldmon_tags;
+						c->oldmon_tags = 0;
+					}
+					client_change_mon(c, m);
+				}
 			}
 		}
 

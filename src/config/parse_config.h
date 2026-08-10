@@ -2392,7 +2392,7 @@ bool parse_option(Config *config, char *key, char *value) {
 		env->value = strdup(env_value);
 
 		config->env =
-			realloc(config->env, (config->env_count + 1) * sizeof(ConfigEnv));
+			realloc(config->env, (config->env_count + 1) * sizeof(ConfigEnv *));
 		if (!config->env) {
 			free(env->type);
 			free(env->value);
