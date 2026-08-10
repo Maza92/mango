@@ -6,6 +6,9 @@
 #include <string.h>
 #include <time.h>
 
+#include <wlr/util/log.h>
+
+#include "log.h"
 #include "util.h"
 
 #define PCRE2_CODE_UNIT_WIDTH 8
@@ -64,7 +67,8 @@ int32_t regex_match(const char *pattern, const char *str) {
 	if (!re) {
 		PCRE2_UCHAR errbuf[256];
 		pcre2_get_error_message(errnum, errbuf, sizeof(errbuf));
-		fprintf(stderr, "PCRE2 error: %s at offset %zu\n", errbuf, erroffset);
+		mango_error(false, WLR_ERROR, "PCRE2 error: %s at offset %zu\n", errbuf,
+					erroffset);
 		return 0;
 	}
 
@@ -205,4 +209,30 @@ void wl_list_swap(struct wl_list *l1, struct wl_list *l2) {
 		tmp2_prev->next = l1;
 		tmp2_next->prev = l1;
 	}
+}
+
+void wl_list_safe_reinsert_prev(struct wl_list *l1, struct wl_list *l2) {
+	if (!l1 || !l2)
+		return;
+	if (l1 == l2)
+		return;
+	if (l1->prev == l2)
+		return;
+
+	wl_list_remove(l2);
+	wl_list_init(l2);
+	wl_list_insert(l1->prev, l2);
+}
+
+void wl_list_safe_reinsert_next(struct wl_list *l1, struct wl_list *l2) {
+	if (!l1 || !l2)
+		return;
+	if (l1 == l2)
+		return;
+	if (l1->next == l2)
+		return;
+
+	wl_list_remove(l2);
+	wl_list_init(l2);
+	wl_list_insert(l1, l2);
 }

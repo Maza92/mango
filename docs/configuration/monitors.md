@@ -30,8 +30,14 @@ monitorrule=name:Values,Parameter:Values,Parameter:Values
 | `y` | integer | 0-99999 | Y position |
 | `scale` | float | 0.01-100.0 | Monitor scale |
 | `vrr` | integer | 0, 1 | Enable variable refresh rate |
+| `hdr` | integer | 0, 1 | Enable hdr support |
+| `hdr_min_lum` | float | 0.0-10000.0 | Mastering display minimum luminance, cd/m² (0 = unset) |
+| `hdr_max_lum` | float | 0.0-10000.0 | Mastering display peak luminance, also sent as max_cll, cd/m² (0 = unset) |
+| `hdr_max_avg_lum` | float | 0.0-10000.0 | Max frame-average light level (max_fall), cd/m² (0 = unset) |
+| `hdr_force` | integer | 0, 1 | Enable HDR even when the EDID does not advertise BT.2020/PQ |
 | `rr` | integer | 0-7 | Monitor transform |
 | `custom` | integer | 0, 1 | Enable custom mode (not supported on all displays — may cause black screen) |
+| `disable` | integer | 0, 1 | Disable the monitor |
 
 ### Transform Values
 
@@ -102,6 +108,77 @@ Tearing allows games to bypass the compositor's VSync for lower latency.
 | :--- | :--- | :--- |
 | `allow_tearing` | `0` | Global tearing control: `0` (Disable), `1` (Enable), `2` (Fullscreen only). |
 
+## HDR
+> HDR is only supported in wl-only branch, since it requires the `vulkan` renderer but scenefx is not supported yet.
+
+| Setting | Default | Description |
+| :--- | :--- | :--- |
+| `hdr_depth` | `2`| Set the hdr depth for the current display. `0` is Default, `1` is HDR8, `2` is HDR10. |
+
+- you should enable HDR in monitorrule first, refer to [Monitors — Monitor Rules](/docs/configuration/monitors#monitor-rules)
+- you must set `env=WLR_RENDERER,vulkan` before mango starts.
+
+#### for example(must relogin once after setting):
+```ini
+env=WLR_RENDERER,vulkan
+monitorrule=name:eDP-1,model:0x15F5,width:1920,height:1080,refresh:60,x:0,y:0,scale:1,vrr:0,rr:0:hdr:1
+```
+
+### Toggling HDR at runtime
+
+`monitorrule` sets the state at startup; `togglehdr` changes it without a config
+reload, the way sway's `output <name> hdr on|off|toggle` does.
+
+```sh
+mmsg dispatch togglehdr              # toggle the focused monitor
+mmsg dispatch togglehdr,on           # force on
+mmsg dispatch togglehdr,off,eDP-1    # a named output
+mmsg dispatch togglehdr,toggle,all   # every output at once
+```
+
+With no argument it toggles the focused monitor. Reloading the config re-applies
+`monitorrule` and overrides whatever `togglehdr` last set.
+
+`all` applies to every enabled output. In toggle mode it makes one decision for
+all of them — if anything is on, everything goes off — rather than flipping each
+output against its own state. Outputs that cannot do HDR are skipped without
+their state being touched.
+
+### Mastering display metadata
+
+`hdr:1` alone declares BT.2020 primaries and the PQ transfer function, but leaves
+the mastering display fields at zero, so the panel has nothing to tone-map
+against. Set them to your panel's values:
+
+```ini
+monitorrule=name:eDP-1,...,hdr:1,hdr_max_lum:616,hdr_max_avg_lum:400
+```
+
+`di-edid-decode` prints them under *HDR Static Metadata Data Block*. `hdr_max_lum`
+is sent both as the mastering peak and as max_cll. Leaving any of the three at `0`
+leaves that field unset, which is the previous behaviour.
+
+> `hdr_min_lum` has no effect on wlroots 0.20.x: the minimum was scaled the wrong
+> way in `backend/drm/atomic.c` and every value underflowed to 0. Fixed upstream
+> by wlroots commit `f6a01b40`, not backported to the 0.20 branch.
+
+### Panels whose EDID hides the HDR block
+
+Some panels declare HDR only inside a **DisplayID 2.0** extension, with the
+CTA-861 blocks nested in a container (tag `0x81`). This is legal EDID 1.4, but
+wlroots reads HDR capability through libdisplay-info's CTA path and comes back
+empty, so `hdr:1` is silently ignored on a panel that handles PQ.
+
+`hdr_force:1` skips the two EDID-derived checks:
+
+```ini
+monitorrule=name:eDP-1,...,hdr:1,hdr_force:1,hdr_max_lum:616,hdr_max_avg_lum:400
+```
+
+It does not skip the renderer check: output colour transforms only exist in the
+Vulkan renderer, so `WLR_RENDERER=vulkan` is still required.
+
+
 ### Configuration
 
 **Enable Globally:**
@@ -130,16 +207,9 @@ windowrule=force_tearing:1,title:vkcube
 
 > **Warning:** Some graphics cards require setting the `WLR_DRM_NO_ATOMIC` environment variable before mango starts to successfully enable tearing.
 
-Add this to `/etc/environment` and reboot:
-
-```bash
-WLR_DRM_NO_ATOMIC=1
+Add this to config and relogin mango:
 ```
-
-Or run mango with the environment variable:
-
-```bash
-WLR_DRM_NO_ATOMIC=1 mango
+env=WLR_DRM_NO_ATOMIC,1
 ```
 
 ---
@@ -156,99 +226,51 @@ WLR_DRM_DEVICES=/dev/dri/card1 mango
 WLR_DRM_DEVICES=/dev/dri/card0:/dev/dri/card1 mango
 ```
 
-Some GPUs have compatibility issues with `syncobj_enable=1` — it may crash apps like `kitty` that use syncobj. Set `WLR_DRM_NO_ATOMIC=1` in `/etc/environment` and reboot to resolve this.
+Some GPUs have compatibility issues with `syncobj_enable=1` — it may crash apps like `kitty` that use syncobj. Set `env=WLR_DRM_NO_ATOMIC,1` in `config.conf` and relogin to resolve this.
 
 ---
 
 ## Power Management
 
 You can control monitor power using the `mmsg` IPC tool.
+> Notice: This sleep command does not remove the monitor, it only turns the power off.
 
 ```bash
-# Turn off
-mmsg dispatch disable_monitor,eDP-1
+# Turn power off
+mmsg dispatch sleep_monitor,eDP-1
 
-# Turn on
-mmsg dispatch enable_monitor,eDP-1
+# Turn power on
+mmsg dispatch wakeup_monitor,eDP-1
 
-# Toggle
-mmsg dispatch toggle_monitor,eDP-1
+# Toggle power
+mmsg dispatch sleep_toggle_monitor,eDP-1
 ```
 
 You can also use `wlr-randr` for monitor management:
 
 ```bash
-# Turn off monitor
-wlr-randr --output eDP-1 --off
+# remove a monitor
+mmsg dispatch disable_monitor,eDP-1
 
-# Turn on monitor
-wlr-randr --output eDP-1 --on
+# add a monitor
+mmsg dispatch enable_monitor,eDP-1
 
-# Show all monitors
+# Show all monitors spec
 wlr-randr
 ```
 
 ---
 
-## Screen Scale
-
-### Without Global Scale (Recommended)
-
-- If you do not use XWayland apps, you can use monitor rules or `wlr-randr` to set a global monitor scale.
-- If you are using XWayland apps, it is not recommended to set a global monitor scale.
-
-You can set scale like this, for example with a 1.4 factor.
-
-**Dependencies:**
-
-```bash
-yay -S xorg-xrdb
-yay -S xwayland-satellite
-```
-
-**In config file:**
+## Screen Scale(1.5 scale example)
 
 ```ini
-env=QT_AUTO_SCREEN_SCALE_FACTOR,1
-env=QT_WAYLAND_FORCE_DPI,140
+# don't scale xwayland in global to avoid blurry
+xwayland_ignore_scale=1
+# scale:1.5 to scale native wayland app
+monitorrule=name:eDP-1,width:1920,height:1080,refresh:60,x:0,y:0,scale:1.5
+# use dpi to scale xwayland(1.5 * 96 = 144)
+exec-once=echo "Xft.dpi: 144" | xrdb -merge
 ```
-
-**In autostart:**
-
-```bash
-echo "Xft.dpi: 140" | xrdb -merge
-gsettings set org.gnome.desktop.interface text-scaling-factor 1.4
-```
-
-**Edit autostart for XWayland:**
-
-```bash
-# Start xwayland
-/usr/sbin/xwayland-satellite :11 &
-# Apply scale 1.4 for xwayland
-sleep 0.5s && echo "Xft.dpi: 140" | xrdb -merge
-```
-
-### Using xwayland-satellite to Prevent Blurry XWayland Apps
-
-If you use fractional scaling, you can use `xwayland-satellite` to automatically scale XWayland apps to prevent blurriness, for example with a scale of 1.4.
-
-**Dependencies:**
-
-```bash
-yay -S xwayland-satellite
-```
-
-**In config file:**
-
-```ini
-env=DISPLAY,:2
-exec-once=xwayland-satellite :2
-monitorrule=name:eDP-1,width:1920,height:1080,refresh:60,x:0,y:0,scale:1.4,vrr:0,rr:0
-```
-
-> **Warning:** Use a `DISPLAY` value other than `:1` to avoid conflicting with mangowm.
-
 ---
 
 ## Virtual Monitors

@@ -1,3 +1,4 @@
+#include <stdbool.h>
 #include <wlr/types/wlr_tearing_control_v1.h>
 
 struct tearing_controller {
@@ -44,8 +45,9 @@ void handle_tearing_new_object(struct wl_listener *listener, void *data) {
 	enum wp_tearing_control_v1_presentation_hint hint =
 		wlr_tearing_control_manager_v1_surface_hint_from_surface(
 			tearing_control, new_tearing_control->surface);
-	wlr_log(WLR_DEBUG, "New presentation hint %d received for surface %p", hint,
-			new_tearing_control->surface);
+	mango_error(true, WLR_DEBUG,
+				"New presentation hint %d received for surface %p", hint,
+				new_tearing_control->surface);
 
 	struct tearing_controller *controller =
 		ecalloc(1, sizeof(struct tearing_controller));
@@ -63,6 +65,9 @@ bool check_tearing_frame_allow(Monitor *m) {
 	if (!config.allow_tearing) {
 		return false;
 	}
+
+	if (!selmon)
+		return false;
 
 	Client *c = selmon->sel;
 
@@ -93,80 +98,4 @@ bool check_tearing_frame_allow(Monitor *m) {
 
 	/* honor tearing as requested by action */
 	return c->force_tearing == STATE_ENABLED;
-}
-
-bool custom_wlr_scene_output_commit(struct wlr_scene_output *scene_output,
-									struct wlr_output_state *state) {
-	struct wlr_output *wlr_output = scene_output->output;
-	Monitor *m = wlr_output->data;
-
-	// 检查是否需要帧
-	if (!wlr_scene_output_needs_frame(scene_output)) {
-		wlr_log(WLR_DEBUG, "No frame needed for output %s", wlr_output->name);
-		return true;
-	}
-
-	// 构建输出状态
-	if (!wlr_scene_output_build_state(scene_output, state, NULL)) {
-		wlr_log(WLR_ERROR, "Failed to build output state for %s",
-				wlr_output->name);
-		return false;
-	}
-
-	// 测试撕裂翻页
-	if (state->tearing_page_flip) {
-		if (!wlr_output_test_state(wlr_output, state)) {
-			state->tearing_page_flip = false;
-		}
-	}
-
-	// 尝试提交
-	bool committed = wlr_output_commit_state(wlr_output, state);
-
-	// 如果启用撕裂翻页但提交失败，重试禁用撕裂翻页
-	if (!committed && state->tearing_page_flip) {
-		wlr_log(WLR_DEBUG, "Retrying commit without tearing for %s",
-				wlr_output->name);
-		state->tearing_page_flip = false;
-		committed = wlr_output_commit_state(wlr_output, state);
-	}
-
-	// 处理状态清理
-	if (committed) {
-		wlr_log(WLR_DEBUG, "Successfully committed output %s",
-				wlr_output->name);
-		if (state == &m->pending) {
-			wlr_output_state_finish(&m->pending);
-			wlr_output_state_init(&m->pending);
-		}
-	} else {
-		wlr_log(WLR_ERROR, "Failed to commit output %s", wlr_output->name);
-		// 即使提交失败，也清理状态避免积累
-		if (state == &m->pending) {
-			wlr_output_state_finish(&m->pending);
-			wlr_output_state_init(&m->pending);
-		}
-		return false;
-	}
-
-	return true;
-}
-
-void apply_tear_state(Monitor *m) {
-	if (wlr_scene_output_needs_frame(m->scene_output)) {
-		wlr_output_state_init(&m->pending);
-		if (wlr_scene_output_build_state(m->scene_output, &m->pending, NULL)) {
-			struct wlr_output_state *pending = &m->pending;
-			pending->tearing_page_flip = true;
-
-			if (!custom_wlr_scene_output_commit(m->scene_output, pending)) {
-				wlr_log(WLR_ERROR, "Failed to commit output %s",
-						m->scene_output->output->name);
-			}
-		} else {
-			wlr_log(WLR_ERROR, "Failed to build state for output %s",
-					m->scene_output->output->name);
-			wlr_output_state_finish(&m->pending);
-		}
-	}
 }

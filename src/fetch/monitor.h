@@ -26,6 +26,14 @@ bool is_scroller_layout(Monitor *m) {
 	return false;
 }
 
+bool is_monocle_layout(Monitor *m) {
+
+	if (m->pertag->ltidxs[m->pertag->curtag]->id == MONOCLE)
+		return true;
+
+	return false;
+}
+
 bool is_centertile_layout(Monitor *m) {
 
 	if (m->pertag->ltidxs[m->pertag->curtag]->id == CENTER_TILE)
@@ -38,7 +46,8 @@ uint32_t get_tag_status(uint32_t tag, Monitor *m) {
 	Client *c = NULL;
 	uint32_t status = 0;
 	wl_list_for_each(c, &clients, link) {
-		if (c->mon == m && c->tags & 1 << (tag - 1) & TAGMASK) {
+		if (c->mon == m && !c->is_logic_hide &&
+			c->tags & 1 << (tag - 1) & TAGMASK) {
 			if (c->isurgent) {
 				status = 2;
 				break;
@@ -57,14 +66,15 @@ uint32_t get_tags_first_tag_num(uint32_t source_tags) {
 		return 0;
 	}
 
-	for (i = 0; !(tag & 1) && source_tags != 0 && i < LENGTH(tags); i++) {
+	for (i = 0; !(tag & 1) && source_tags != 0 && i < (uint32_t)config.tag_num;
+		 i++) {
 		tag = source_tags >> i;
 	}
 
 	if (i == 1) {
 		return 1;
-	} else if (i > 9) {
-		return 9;
+	} else if (i >= (uint32_t)config.tag_num) {
+		return config.tag_num;
 	} else {
 		return i;
 	}
@@ -79,14 +89,15 @@ uint32_t get_tags_first_tag(uint32_t source_tags) {
 		return selmon->pertag->curtag;
 	}
 
-	for (i = 0; !(tag & 1) && source_tags != 0 && i < LENGTH(tags); i++) {
+	for (i = 0; !(tag & 1) && source_tags != 0 && i < (uint32_t)config.tag_num;
+		 i++) {
 		tag = source_tags >> i;
 	}
 
 	if (i == 1) {
 		return 1;
-	} else if (i > 9) {
-		return 1 << 8;
+	} else if (i >= (uint32_t)config.tag_num) {
+		return 1 << (config.tag_num - 1);
 	} else {
 		return 1 << (i - 1);
 	}

@@ -51,6 +51,8 @@ You can divide key bindings into named modes. Rules:
 2. If no `keymode` is set before a bind, it belongs to the `default` mode.
 3. The special `common` keymode applies its binds **across all modes**.
 
+> **Info:** Key modes also apply to the other input bindings — `mousebind`, `axisbind`, `gesturebind` and `switchbind` — which share the exact same `keymode` rules as `bind`.
+
 Use `setkeymode` to switch modes, and `mmsg get keymode` to query the current mode.
 
 ```ini
@@ -98,7 +100,7 @@ bindr=Super,Super_L,spawn,rofi -show run
 | `toggle_render_border` | - | Toggle border rendering. |
 | `centerwin` | - | Center the floating window. |
 | `minimized` | - | Minimize window to scratchpad. |
-| `restore_minimized` | - | Restore window from scratchpad. |
+| `restore_minimized` | `0/1` | Restore minimized window to its previous state.(`1` means keep previous tags, `0` means restore to current tags.) |
 | `toggle_scratchpad` | - | Toggle scratchpad. |
 | `toggle_named_scratchpad` | `appid,title,cmd` | Toggle named scratchpad. Launches app if not running, otherwise shows/hides it. |
 
@@ -106,33 +108,50 @@ bindr=Super,Super_L,spawn,rofi -show run
 
 | Command | Param | Description |
 | :--- | :--- | :--- |
+| `focusid` | - | Focus window (can target any window via IPC: `mmsg dispatch focusid client,<id>`) |
 | `focusdir` | `left/right/up/down` | Focus window in direction. |
+| `focus_window_or_workspace` | `left/right/up/down` | Focus window in direction; otherwise jump to the nearest adjacent tag that has clients, falling back to the next/previous tag if none. |
 | `focusstack` | `next/prev` | Cycle focus within the stack. |
 | `focuslast` | - | Focus the previously active window. |
 | `exchange_client` | `left/right/up/down` | Swap window with neighbor in direction. |
 | `exchange_stack_client` | `next/prev` | Exchange window position in stack. |
 | `zoom` | - | Swap focused window with Master. |
 
+### Group
+| Command | Param | Description |
+| :--- | :--- | :--- |
+| `groupjoin` | `left/right/up/down`  | Join group by direction. |
+| `groupfocus` | `prev/next`  | Focus group member by direction. |
+| `groupleave` | -  | Leave group. |
+
 ### Tags & Monitors
 
 | Command | Param | Description |
 | :--- | :--- | :--- |
-| `view` | `-1/0/1-9` or `mask [,synctag]` | View tag. `-1` = previous tagset, `0` = all tags, `1-9` = specific tag, mask e.g. `1\|3\|5`. Optional `synctag` (0/1) syncs the action to all monitors. |
+| `view` | `mask[,synctag]` | View tag(s). Accepts a [tag mask](/docs/bindings/keys#tag-mask-format). Additionally, `0` shows all tags, `-1` shows the previous tagset. Optional `synctag` (0/1) syncs the action to all monitors. |
 | `viewtoleft` | `[synctag]` | View previous tag. Optional `synctag` (0/1) syncs to all monitors. |
 | `viewtoright` | `[synctag]` | View next tag. Optional `synctag` (0/1) syncs to all monitors. |
 | `viewtoleft_have_client` | `[synctag]` | View left tag and focus client if present. Optional `synctag` (0/1). |
 | `viewtoright_have_client` | `[synctag]` | View right tag and focus client if present. Optional `synctag` (0/1). |
-| `viewcrossmon` | `tag,monitor_spec` | View specified tag on specified monitor. |
-| `tag` | `1-9 [,synctag]` | Move window to tag. Optional `synctag` (0/1) syncs to all monitors. |
-| `tagsilent` | `1-9` | Move window to tag without focusing it. |
+| `viewcrossmon` | `mask,monitor_spec` | View specified tag(s) on specified monitor. Accepts a [tag mask](/docs/bindings/keys#tag-mask-format) and a [monitor spec](/docs/configuration/monitors#monitor-spec-format). |
+| `tag` | `mask[,synctag]` | Move window to tag(s). Accepts a [tag mask](/docs/bindings/keys#tag-mask-format). Optional `synctag` (0/1) syncs to all monitors. |
+| `tagsilent` | `mask` | Move window to tag(s) without focusing it. Accepts a [tag mask](/docs/bindings/keys#tag-mask-format). |
 | `tagtoleft` | `[synctag]` | Move window to left tag. Optional `synctag` (0/1). |
 | `tagtoright` | `[synctag]` | Move window to right tag. Optional `synctag` (0/1). |
-| `tagcrossmon` | `tag,monitor_spec` | Move window to specified tag on specified monitor. |
-| `toggletag` | `0-9` | Toggle tag on window (0 means all tags). |
-| `toggleview` | `1-9` | Toggle tag view. |
-| `comboview` | `1-9` | View multi tags pressed simultaneously. |
+| `tagcrossmon` | `mask,monitor_spec` | Move window to tag(s) on specified monitor. Accepts a [tag mask](/docs/bindings/keys#tag-mask-format) and a [monitor spec](/docs/configuration/monitors#monitor-spec-format). |
+| `toggletag` | `mask` | Toggle tag(s) on window. Accepts a [tag mask](/docs/bindings/keys#tag-mask-format). `0` toggles all tags. |
+| `toggleview` | `mask` | Toggle view of tag(s). Accepts a [tag mask](/docs/bindings/keys#tag-mask-format). |
+| `comboview` | `mask` | View multiple tags simultaneously. Accepts a [tag mask](/docs/bindings/keys#tag-mask-format) (typically built by pressing keys, e.g., `1|3`). |
 | `focusmon` | `left/right/up/down/monitor_spec` | Focus monitor by direction or [monitor spec](/docs/configuration/monitors#monitor-spec-format). |
 | `tagmon` | `left/right/up/down/monitor_spec,[keeptag]` | Move window to monitor by direction or [monitor spec](/docs/configuration/monitors#monitor-spec-format). `keeptag` is 0 or 1. |
+
+#### Tag Mask Format
+
+A tag mask specifies one or more tags for commands that operate on tags.  
+It is formed by tag numbers `1`–`9`, optionally combined with `|`.
+
+- `3` – single tag 3
+- `1|3|5` – tags 1, 3, and 5
 
 ### Layouts
 
@@ -150,6 +169,7 @@ bindr=Super,Super_L,spawn,rofi -show run
 |  `dwindle_toggle_split_direction` | - | Toggle split direction in dwindle layout. |
 | `dwindle_split_horizontal` | - | Set split window direction to horizontal in dwindle layout. |
 | `dwindle_split_vertical` | - | Set split window direction to vertical in dwindle layout. |
+| `dwindle_toggle_current_split` | - | Toggle split direction of current window in dwindle layout. |
 
 ### System
 
@@ -157,10 +177,12 @@ bindr=Super,Super_L,spawn,rofi -show run
 | :--- | :--- | :--- |
 | `spawn` | `cmd` | Execute a command. |
 | `spawn_shell` | `cmd` | Execute shell command (supports pipes `\|`). |
-| `spawn_on_empty` | `cmd,tagnumber` | Open command on empty tag. |
+| `spawn_on_empty` | `cmd, tagmask` | Open command on empty tag.Accepts a cmd string and [tagmask](/docs/bindings/keys#tag-mask-format) |
 | `reload_config` | - | Hot-reload configuration. |
+| `load_config_file` | `file path` | Load configuration from the specified file. Empty path resets to default config location. |
 | `quit` | - | Exit mangowm. |
 | `toggleoverview` | - | Toggle overview mode. |
+| `togglejump` | - | Toggle overview with jump mode. |
 | `create_virtual_output` | - | Create a headless monitor (for VNC/Sunshine). |
 | `destroy_all_virtual_output` | - | Destroy all virtual monitors. |
 | `toggleoverlay` | - | Toggle overlay state for the focused window. |
@@ -168,9 +190,12 @@ bindr=Super,Super_L,spawn,rofi -show run
 | `setkeymode` | `mode` | Set keymode. |
 | `switch_keyboard_layout` | `[index]` | Switch keyboard layout. Optional index (0, 1, 2...) to switch to specific layout. |
 | `setoption` | `key,value` | Set config option temporarily. |
-| `disable_monitor` | `monitor_spec` | Shutdown monitor. Accepts a [monitor spec](/docs/configuration/monitors#monitor-spec-format). |
-| `enable_monitor` | `monitor_spec` | Power on monitor. Accepts a [monitor spec](/docs/configuration/monitors#monitor-spec-format). |
-| `toggle_monitor` | `monitor_spec` | Toggle monitor power. Accepts a [monitor spec](/docs/configuration/monitors#monitor-spec-format). |
+| `sleep_monitor` | `monitor_spec` | Shutdown monitor power but not remove. Accepts a [monitor spec](/docs/configuration/monitors#monitor-spec-format). |
+| `wakeup_monitor` | `monitor_spec` | Turn on monitor power. Accepts a [monitor spec](/docs/configuration/monitors#monitor-spec-format). |
+| `sleep_toggle_monitor` | `monitor_spec` | Toggle monitor power but not remove. Accepts a [monitor spec](/docs/configuration/monitors#monitor-spec-format).
+| `disable_monitor` | `monitor_spec` | remove monitor. Accepts a [monitor spec](/docs/configuration/monitors#monitor-spec-format). |
+| `enable_monitor` | `monitor_spec` | add monitor. Accepts a [monitor spec](/docs/configuration/monitors#monitor-spec-format). |
+| `toggle_monitor` | `monitor_spec` | Toggle monitor add/remove. Accepts a [monitor spec](/docs/configuration/monitors#monitor-spec-format). |
 
 ### Media Controls
 

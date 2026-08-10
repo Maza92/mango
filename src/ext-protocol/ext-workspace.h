@@ -1,4 +1,4 @@
-#include "wlr_ext_workspace_v1.h"
+#include <wlr/types/wlr_ext_workspace_v1.h>
 
 #define EXT_WORKSPACE_ENABLE_CAPS                                              \
 	EXT_WORKSPACE_HANDLE_V1_WORKSPACE_CAPABILITIES_ACTIVATE |                  \
@@ -68,7 +68,8 @@ static void handle_ext_commit(struct wl_listener *listener, void *data) {
 			}
 
 			goto_workspace(workspace);
-			wlr_log(WLR_INFO, "ext activating workspace %d", workspace->tag);
+			mango_error(true, WLR_INFO, "ext activating workspace %d",
+						workspace->tag);
 			break;
 		}
 		case WLR_EXT_WORKSPACE_V1_REQUEST_DEACTIVATE: {
@@ -90,7 +91,8 @@ static void handle_ext_commit(struct wl_listener *listener, void *data) {
 			}
 
 			toggle_workspace(workspace);
-			wlr_log(WLR_INFO, "ext deactivating workspace %d", workspace->tag);
+			mango_error(true, WLR_INFO, "ext deactivating workspace %d",
+						workspace->tag);
 			break;
 		}
 		default:
@@ -100,13 +102,14 @@ static void handle_ext_commit(struct wl_listener *listener, void *data) {
 }
 
 static const char *get_name_from_tag(uint32_t tag) {
-	static const char *names[] = {
-		"overview", "1", "2", "3", "4", "5", "6", "7", "8", "9",
-		"10", "11", "12", "13", "14", "15", "16", "17", "18", "19",
-		"20", "21", "22", "23", "24", "25", "26", "27", "28", "29",
-		"30", "31", "32"
-	};
-	return (tag < sizeof(names) / sizeof(names[0])) ? names[tag] : NULL;
+	if (tag == 0)
+		return "overview";
+	if (tag <= (uint32_t)config.tag_num)
+		return tags[tag - 1];
+	// dynamic tags beyond initial count
+	static char buf[8];
+	snprintf(buf, sizeof(buf), "%u", tag);
+	return buf;
 }
 
 void destroy_workspace(struct workspace *workspace) {
@@ -152,7 +155,7 @@ static void add_workspace_by_tag(int32_t tag, Monitor *m) {
 	wlr_ext_workspace_handle_v1_set_name(workspace->ext_workspace, name);
 }
 
-void dwl_ext_workspace_printstatus(Monitor *m) {
+void mango_ext_workspace_printstatus(Monitor *m) {
 	struct workspace *w;
 	uint32_t tag_status = 0;
 
@@ -201,16 +204,18 @@ static bool workspace_exists_for_tag(uint32_t tag, Monitor *m) {
 void refresh_monitors_workspaces_status(Monitor *m) {
 	int32_t i;
 
+	if (!m || !m->wlr_output->enabled || m->iscleanuping) {
+		return;
+	}
+
 	if (m->isoverview) {
-		for (i = 1; i <= LENGTH(tags); i++) {
+		add_workspace_by_tag(0, m);
+		for (i = 1; i <= config.tag_num; i++) {
 			remove_workspace_by_tag(i, m);
-		}
-		if (!workspace_exists_for_tag(0, m)) {
-			add_workspace_by_tag(0, m);
 		}
 	} else {
 		remove_workspace_by_tag(0, m);
-		for (i = 1; i <= 32; i++) {
+		for (i = 1; i <= config.tag_num; i++) {
 			if (m->active_tags_mask & (1U << (i - 1))) {
 				if (!workspace_exists_for_tag(i, m)) {
 					add_workspace_by_tag(i, m);
@@ -221,7 +226,49 @@ void refresh_monitors_workspaces_status(Monitor *m) {
 		}
 	}
 
-	dwl_ext_workspace_printstatus(m);
+	mango_ext_workspace_printstatus(m);
+}
+
+void sync_workspaces_to_tag_num(Monitor *m) {
+	if (!m || !m->wlr_output->enabled || m->iscleanuping)
+		return;
+
+	struct workspace *w, *tmp;
+
+	if (m->isoverview) {
+		bool has_overview = false;
+		wl_list_for_each_safe(w, tmp, &workspaces, link) {
+			if (w->m == m) {
+				if (w->tag == 0) {
+					has_overview = true;
+				} else {
+					destroy_workspace(w);
+				}
+			}
+		}
+		if (!has_overview)
+			add_workspace_by_tag(0, m);
+	} else {
+		// 普通状态:销毁超出 tag_num 的旧 tag workspace
+		wl_list_for_each_safe(w, tmp, &workspaces, link) {
+			if (w->m == m && w->tag > config.tag_num)
+				destroy_workspace(w);
+		}
+		// 补充缺失的tag
+		for (int32_t i = 1; i <= config.tag_num; i++) {
+			bool exists = false;
+			wl_list_for_each(w, &workspaces, link) {
+				if (w->m == m && w->tag == i) {
+					exists = true;
+					break;
+				}
+			}
+			if (!exists)
+				add_workspace_by_tag(i, m);
+		}
+	}
+
+	mango_ext_workspace_printstatus(m);
 }
 
 void workspaces_init() {

@@ -73,7 +73,7 @@ static const char *ipc_get_layout_str(void) {
 
 static cJSON *tags_mask_to_array(uint32_t tagmask) {
 	cJSON *arr = cJSON_CreateArray();
-	for (int i = 0; i < LENGTH(tags); i++)
+	for (int i = 0; i < config.tag_num; i++)
 		if (tagmask & (1 << i))
 			cJSON_AddItemToArray(arr, cJSON_CreateNumber(i + 1));
 	return arr;
@@ -82,10 +82,11 @@ static cJSON *tags_mask_to_array(uint32_t tagmask) {
 static cJSON *build_tags_json(Monitor *m) {
 	cJSON *tags_array = cJSON_CreateArray();
 	Client *c = NULL;
-	for (int tag = 1; tag <= 32; tag++) {
+	for (int tag = 1; tag <= config.tag_num; tag++) {
 		if (!(m->active_tags_mask & (1U << (tag - 1))))
 			continue;
 		int numclients = 0;
+		uint32_t client_status = 0;
 		bool is_active = false, is_urgent = false;
 		bool is_migrated = false;
 		const char *source_monitor = "";
@@ -94,11 +95,12 @@ static cJSON *build_tags_json(Monitor *m) {
 		if (tagmask & m->tagset[m->seltags])
 			is_active = true;
 		wl_list_for_each(c, &clients, link) {
-			if (c->mon != m)
+			client_status = get_tag_status(tag, m);
+
+			if (!client_status)
 				continue;
-			if (!(c->tags & tagmask & TAGMASK))
-				continue;
-			if (c->isurgent)
+
+			if (client_status == 2)
 				is_urgent = true;
 			if (c->oldmonname[0] != '\0') {
 				is_migrated = true;
@@ -147,7 +149,7 @@ static cJSON *monitor_active_tags(Monitor *m) {
 		return arr;
 	}
 	tagset = m->tagset[m->seltags];
-	for (int i = 0; i < 32; i++)
+	for (int i = 0; i < config.tag_num; i++)
 		if (tagset & (1 << i))
 			cJSON_AddItemToArray(arr, cJSON_CreateNumber(i + 1));
 	return arr;
@@ -158,12 +160,19 @@ static cJSON *build_client_json(Client *c) {
 
 	cJSON_AddNumberToObject(obj, "id", c->id);
 	cJSON_AddNumberToObject(obj, "pid", c->pid);
+	cJSON_AddStringToObject(obj, "foreign_toplevel_id",
+							c->ext_foreign_toplevel->identifier);
 	cJSON_AddStringToObject(obj, "title", client_get_title(c));
 	cJSON_AddStringToObject(obj, "appid", client_get_appid(c));
 	cJSON_AddStringToObject(obj, "mark", c->mark ? c->mark : "");
 	cJSON_AddStringToObject(obj, "monitor",
 							c->mon ? c->mon->wlr_output->name : "");
 	cJSON_AddItemToObject(obj, "tags", tags_mask_to_array(c->tags));
+	cJSON_AddBoolToObject(obj, "is_xwayland", c->type == X11 ? true : false);
+	cJSON_AddBoolToObject(obj, "is_swallowing", c->swallowing ? true : false);
+	cJSON_AddBoolToObject(obj, "is_swallowedby", c->swallowdby ? true : false);
+	cJSON_AddBoolToObject(obj, "is_group", c->group_prev || c->group_next);
+	cJSON_AddBoolToObject(obj, "is_visible", c->mon && VISIBLEON(c, c->mon));
 	cJSON_AddBoolToObject(obj, "is_focused", c->isfocusing);
 	cJSON_AddBoolToObject(obj, "is_fullscreen", c->isfullscreen);
 	cJSON_AddBoolToObject(obj, "is_floating", c->isfloating);
@@ -183,6 +192,8 @@ static cJSON *build_client_json(Client *c) {
 	cJSON_AddNumberToObject(obj, "y", c->geom.y);
 	cJSON_AddNumberToObject(obj, "width", c->geom.width);
 	cJSON_AddNumberToObject(obj, "height", c->geom.height);
+	cJSON_AddNumberToObject(obj, "scroller_proportion",
+							(double)c->scroller_proportion);
 	return obj;
 }
 
@@ -190,6 +201,8 @@ static cJSON *build_monitor_json(Monitor *m) {
 	cJSON *resp = cJSON_CreateObject();
 	cJSON_AddStringToObject(resp, "name", m->wlr_output->name);
 	cJSON_AddBoolToObject(resp, "active", m == selmon);
+	cJSON_AddBoolToObject(resp, "is_hdr", m->is_hdr_enabling);
+	cJSON_AddBoolToObject(resp, "is_vrr", m->is_vrr_enabling);
 	cJSON_AddNumberToObject(resp, "x", m->m.x);
 	cJSON_AddNumberToObject(resp, "y", m->m.y);
 	cJSON_AddNumberToObject(resp, "width", m->m.width);
@@ -254,6 +267,15 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 	if (strcmp(cmd, "get version") == 0) {
 		resp = cJSON_CreateObject();
 		cJSON_AddStringToObject(resp, "version", VERSION);
+	} else if (strcmp(cmd, "get cursorpos") == 0) {
+		resp = cJSON_CreateObject();
+		cJSON_AddNumberToObject(resp, "x", cursor->x);
+		cJSON_AddNumberToObject(resp, "y", cursor->y);
+		Monitor *m = xytomon(cursor->x, cursor->y);
+		if (m)
+			cJSON_AddStringToObject(resp, "monitor", m->wlr_output->name);
+		else
+			cJSON_AddNullToObject(resp, "monitor");
 	} else if (strcmp(cmd, "get keymode") == 0) {
 		resp = cJSON_CreateObject();
 		cJSON_AddStringToObject(resp, "keymode", keymode.mode);
@@ -327,7 +349,7 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 		}
 		int tag_idx = ext_tag_idx - 1;
 		Monitor *m = monitor_by_name(mon_name);
-		if (!m || tag_idx < 0 || tag_idx >= 32 || !(m->active_tags_mask & (1U << tag_idx))) {
+		if (!m || tag_idx < 0 || tag_idx >= config.tag_num || !(m->active_tags_mask & (1U << tag_idx))) {
 			send_static_json(client_fd,
 							 "{\"error\":\"invalid monitor or tag index\"}\n");
 			return;
@@ -782,11 +804,14 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 			while (end >= token && (*end == ' ' || *end == '\t'))
 				*end-- = '\0';
 			tokens[token_count++] = token;
-			token = strtok_r(NULL, ",", &saveptr);
+			if (token_count >= 5)
+				token = saveptr;
+			else
+				token = strtok_r(NULL, ",", &saveptr);
 		}
 
 		Arg arg = {0};
-		int32_t (*func)(const Arg *) = parse_func_name(
+		void (*func)(const Arg *) = parse_func_name(
 			token_count > 0 ? tokens[0] : "", &arg,
 			token_count > 1 ? tokens[1] : "", token_count > 2 ? tokens[2] : "",
 			token_count > 3 ? tokens[3] : "", token_count > 4 ? tokens[4] : "",
@@ -1044,7 +1069,7 @@ static int ipc_handle_client_data(int fd, uint32_t mask, void *data) {
 			size_t new_cap = client->buf_cap ? client->buf_cap * 2 : 8192;
 			char *new_buf = realloc(client->buf, new_cap);
 			if (!new_buf) {
-				wlr_log(WLR_ERROR, "IPC: out of memory");
+				mango_error(true, WLR_ERROR, "IPC: out of memory");
 				goto cleanup;
 			}
 			client->buf = new_buf;
@@ -1417,20 +1442,26 @@ void ipc_init(struct wl_event_loop *event_loop) {
 	// 设置 FD_CLOEXEC
 	int flags = fcntl(ipc_sock_fd, F_GETFD, 0);
 	if (flags == -1 || fcntl(ipc_sock_fd, F_SETFD, flags | FD_CLOEXEC) == -1) {
-		wlr_log(WLR_ERROR, "failed to set FD_CLOEXEC on IPC socket");
+		mango_error(true, WLR_ERROR, "failed to set FD_CLOEXEC on IPC socket");
 		close(ipc_sock_fd);
 		return;
 	}
 	// 设置 O_NONBLOCK
 	flags = fcntl(ipc_sock_fd, F_GETFL, 0);
 	if (flags == -1 || fcntl(ipc_sock_fd, F_SETFL, flags | O_NONBLOCK) == -1) {
-		wlr_log(WLR_ERROR, "failed to set O_NONBLOCK on IPC socket");
+		mango_error(true, WLR_ERROR, "failed to set O_NONBLOCK on IPC socket");
 		close(ipc_sock_fd);
 		return;
 	}
 
 	struct sockaddr_un addr = {.sun_family = AF_UNIX};
-	strncpy(addr.sun_path, ipc_socket_path, sizeof(addr.sun_path) - 1);
+	int len =
+		snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", ipc_socket_path);
+	if (len < 0 || (size_t)len >= sizeof(addr.sun_path)) {
+		wlr_log(WLR_ERROR, "IPC socket path too long for sun_path");
+		close(ipc_sock_fd);
+		return;
+	}
 
 	unlink(ipc_socket_path);
 	if (bind(ipc_sock_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {

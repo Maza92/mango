@@ -11,7 +11,6 @@
 #include <scenefx/render/fx_renderer/fx_renderer.h>
 #include <scenefx/types/fx/blur_data.h>
 #include <scenefx/types/fx/clipped_region.h>
-#include <scenefx/types/fx/corner_location.h>
 #include <scenefx/types/wlr_scene.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -32,6 +31,8 @@
 #include <wlr/render/allocator.h>
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/types/wlr_alpha_modifier_v1.h>
+#include <wlr/types/wlr_color_management_v1.h>
+#include <wlr/types/wlr_color_representation_v1.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_cursor.h>
 #include <wlr/types/wlr_cursor_shape_v1.h>
@@ -41,8 +42,10 @@
 #include <wlr/types/wlr_drm_lease_v1.h>
 #include <wlr/types/wlr_export_dmabuf_v1.h>
 #include <wlr/types/wlr_ext_data_control_v1.h>
+#include <wlr/types/wlr_ext_foreign_toplevel_list_v1.h>
 #include <wlr/types/wlr_ext_image_capture_source_v1.h>
 #include <wlr/types/wlr_ext_image_copy_capture_v1.h>
+#include <wlr/types/wlr_fixes.h>
 #include <wlr/types/wlr_fractional_scale_v1.h>
 #include <wlr/types/wlr_gamma_control_v1.h>
 #include <wlr/types/wlr_idle_inhibit_v1.h>
@@ -75,6 +78,7 @@
 #include <wlr/types/wlr_tablet_pad.h>
 #include <wlr/types/wlr_tablet_tool.h>
 #include <wlr/types/wlr_tablet_v2.h>
+#include <wlr/types/wlr_touch.h>
 #include <wlr/types/wlr_viewporter.h>
 #include <wlr/types/wlr_virtual_keyboard_v1.h>
 #include <wlr/types/wlr_virtual_pointer_v1.h>
@@ -95,11 +99,13 @@
 #include <wlr/xwayland.h>
 #include <xcb/xcb_icccm.h>
 #endif
+#include "common/log.h"
 #include "common/util.h"
+#include "draw/text-node.h"
 
 /* macros */
-#define MAX(A, B) ((A) > (B) ? (A) : (B))
-#define MIN(A, B) ((A) < (B) ? (A) : (B))
+#define MANGO_MAX(A, B) ((A) > (B) ? (A) : (B))
+#define MANGO_MIN(A, B) ((A) < (B) ? (A) : (B))
 #define GEZERO(A) ((A) >= 0 ? (A) : 0)
 #define CLEANMASK(mask) (mask & ~WLR_MODIFIER_CAPS)
 #define INSIDEMON(A)                                                           \
@@ -113,6 +119,8 @@
 #define ISTILED(A)                                                             \
 	(A && !(A)->isfloating && !(A)->isminimized && !(A)->iskilling &&          \
 	 !(A)->ismaximizescreen && !(A)->isfullscreen && !(A)->isunglobal)
+#define ISNORMAL(A)                                                            \
+	(A && !(A)->isminimized && !(A)->iskilling && !(A)->isunglobal)
 #define ISSCROLLTILED(A)                                                       \
 	(A && !(A)->isfloating && !(A)->isminimized && !(A)->iskilling &&          \
 	 !(A)->isunglobal)
@@ -120,13 +128,25 @@
 	(A && !(A)->isfloating && !(A)->isminimized && !(A)->iskilling &&          \
 	 !(A)->isunglobal)
 #define VISIBLEON(C, M)                                                        \
-	((C) && (M) && (C)->mon == (M) &&                                          \
+	((C) && (M) && (C)->mon == (M) && !(C)->is_logic_hide &&                   \
 	 (((C)->tags & (M)->tagset[(M)->seltags] || (C)->isglobal ||               \
 	   (C)->isunglobal)))
+
+#define TAGMATCH(C, M)                                                         \
+	((C) && (M) && (C)->mon == (M) && (((C)->tags & (M)->tagset[(M)->seltags])))
+
+#define ISMODEKEYCODE(KEY)                                                     \
+	((KEY) == 133 || (KEY) == 37 || (KEY) == 64 || (KEY) == 50 ||              \
+	 (KEY) == 134 || (KEY) == 105 || (KEY) == 108 || (KEY) == 62)
+
 #define LENGTH(X) (sizeof X / sizeof X[0])
 #define END(A) ((A) + LENGTH(A))
-#define TAGMASK (LENGTH(tags) >= 32 ? ~0U : (1U << LENGTH(tags)) - 1)
+
 #define LISTEN(E, L, H) wl_signal_add((E), ((L)->notify = (H), (L)))
+
+#define TAGMASK (tagmask)
+uint32_t tagmask = ((1u << 9) - 1); // 默认 9 个 tag
+
 #define ISFULLSCREEN(A)                                                        \
 	((A)->isfullscreen || (A)->ismaximizescreen ||                             \
 	 (A)->overview_ismaximizescreenbak || (A)->overview_isfullscreenbak)
@@ -162,13 +182,22 @@ enum { TOP_LEFT, TOP_RIGHT, BOTTOM_LEFT, BOTTOM_RIGHT };
 enum { VERTICAL, HORIZONTAL };
 enum { SWIPE_UP, SWIPE_DOWN, SWIPE_LEFT, SWIPE_RIGHT };
 enum { CurNormal, CurPressed, CurMove, CurResize }; /* cursor */
-enum { XDGShell, LayerShell, X11 };					/* client types */
-enum { AxisUp, AxisDown, AxisLeft, AxisRight };		// 滚轮滚动的方向
+enum {
+	XDGShell,
+	LayerShell,
+	X11,
+	Snapshot,
+	XdgPopup,
+	XdgImPopup,
+	GroupBar
+}; /* client types */
+enum { AxisUp, AxisDown, AxisLeft, AxisRight }; // 滚轮滚动的方向
 enum {
 	LyrBg,
 	LyrBlur,
 	LyrBottom,
 	LyrTile,
+	LyrMaximize,
 	LyrTop,
 	LyrFadeOut,
 	LyrOverlay,
@@ -176,6 +205,7 @@ enum {
 	LyrBlock,
 	NUM_LAYERS
 }; /* scene layers */
+
 #ifdef XWAYLAND
 enum {
 	NetWMWindowTypeDialog,
@@ -243,30 +273,16 @@ typedef struct {
 } Arg;
 
 typedef struct {
-	uint32_t mod;
-	uint32_t button;
-	int32_t (*func)(const Arg *);
-	const Arg arg;
-} Button; // 鼠标按键
-
-typedef struct {
 	char mode[28];
 	bool isdefault;
 } KeyMode;
 
 typedef struct {
-	uint32_t mod;
-	uint32_t dir;
-	int32_t (*func)(const Arg *);
-	const Arg arg;
-} Axis;
-
-typedef struct {
 	struct wl_list link;
 	struct wlr_input_device *wlr_device;
 	struct libinput_device *libinput_device;
-	struct wl_listener destroy_listener; // 用于监听设备销毁事件
-	void *device_data;					 // 新增：指向设备特定数据（如 Switch）
+	struct wl_listener destroy_listener;
+	void *device_data;
 } InputDevice;
 
 typedef struct {
@@ -276,7 +292,7 @@ typedef struct {
 	InputDevice *input_dev;
 } Switch;
 
-struct dwl_animation {
+struct mango_animation {
 	bool should_animate;
 	bool running;
 	bool tagining;
@@ -285,6 +301,7 @@ struct dwl_animation {
 	bool begin_fade_in;
 	bool tag_from_rule;
 	bool overining;
+	bool overview_enter_anim_set;
 	uint32_t time_started;
 	uint32_t duration;
 	struct wlr_box initial;
@@ -292,7 +309,7 @@ struct dwl_animation {
 	int32_t action;
 };
 
-struct dwl_opacity_animation {
+struct mango_opacity_animation {
 	bool running;
 	float current_opacity;
 	float target_opacity;
@@ -312,13 +329,27 @@ typedef struct {
 	float height_scale;
 	int32_t width;
 	int32_t height;
-	enum corner_location corner_location;
+	struct fx_corner_radii corner_location;
 	bool should_scale;
 } BufferData;
 
+// overview 卡片 surface 节点：每个 surface（含 subsurface）对应卡片树中
+// 的一个 scene_surface 节点，sx/sy 是其相对根 surface 的坐标
+struct ov_card_surface {
+	Client *c;
+	struct wlr_surface *surface;
+	struct wlr_scene_surface *scene_surface;
+	struct wlr_scene_buffer *buffer;
+	int sx, sy; /* 相对根 surface 的坐标 */
+	bool is_root;
+	struct wl_list link;
+	struct wl_listener commit;	/* 提交后重算缩放（提交会重置 dest/source） */
+	struct wl_listener destroy; /* surface 销毁时移除节点 */
+};
+
 struct Client {
 	/* Must keep these three elements in this order */
-	uint32_t type; /* XDGShell or X11* */
+	uint32_t type; // must at first in struct
 	struct wlr_box geom, pending, float_geom, animainit_geom,
 		overview_backup_geom, current,
 		drag_begin_geom; /* layout-relative, includes border */
@@ -329,8 +360,16 @@ struct Client {
 	struct wlr_scene_rect *dim_rect;
 	struct wlr_scene_rect *splitindicator[4];
 	struct wlr_scene_shadow *shadow;
+	struct wlr_scene_rect *shield;
+	struct wlr_scene_blur *blur;
 	struct wlr_scene_tree *scene_surface;
+	struct wlr_scene_tree *image_capture_tree;
+	struct wlr_scene *image_capture_scene;
+	struct wlr_ext_image_capture_source_v1 *image_capture_source;
+	struct wlr_scene_surface *image_capture_scene_surface;
 	struct wlr_scene_tree *overview_scene_surface;
+	MangoJumpLabel *jump_label_node;
+	MangoGroupBar *group_bar;
 	struct wl_list link;
 	struct wl_list flink;
 	struct wl_list fadeout_link;
@@ -354,6 +393,16 @@ struct Client {
 	struct wl_listener set_hints;
 	struct wl_listener set_geometry;
 	struct wl_listener commmitx11;
+	struct wl_listener scene_commit; /* scene 处理后强制 dest_size */
+	struct wlr_scene_buffer *xwl_root_buffer;
+	float xwayland_scale;	 /* X11 坐标相对逻辑坐标的缩放 */
+	struct wlr_box xwl_clip; /* XWayland 根 surface 最近一次逻辑裁剪区 */
+	bool xwl_clip_active;	 /* 是否处于 source_box 裁剪状态 */
+	/* X11 configure 去重：客户端尚未 ack 时 surface->current 不更新，
+	 * 多次 arrange 会重复发相同参数的 configure，导致客户端反复重渲染/
+	 * 上传。这里记录最近一次请求的物理尺寸/位置，相同参数不再重复发送。 */
+	int32_t xwl_req_x, xwl_req_y, xwl_req_w, xwl_req_h;
+	bool xwl_req_valid;
 #endif
 	uint32_t bw;
 	uint32_t tags, oldtags, mini_restore_tag, oldmon_tags;
@@ -363,13 +412,18 @@ struct Client {
 	struct wlr_foreign_toplevel_handle_v1 *foreign_toplevel;
 	int32_t isfloating, isurgent, isfullscreen, isfakefullscreen,
 		need_float_size_reduce, isminimized, isoverlay, isnosizehint,
-		ignore_maximize, ignore_minimize, idleinhibit_when_focus;
+		ignore_maximize, ignore_minimize, idleinhibit_when_focus,
+		vrr_only_fullscreen, force_render, activation_bypass;
 	int32_t ismaximizescreen;
 	int32_t overview_backup_bw;
 	int32_t fullscreen_backup_x, fullscreen_backup_y, fullscreen_backup_w,
 		fullscreen_backup_h;
 	int32_t overview_isfullscreenbak, overview_ismaximizescreenbak,
 		overview_isfloatingbak;
+
+	struct wlr_scene_tree *
+		ov_card_tree; /* overview 卡片树（含主 surface + 各 subsurface 节点） */
+	struct wl_list ov_card_surfaces; /* struct ov_card_surface 链表 */
 
 	struct wlr_xdg_toplevel_decoration_v1 *decoration;
 	struct wl_listener foreign_activate_request;
@@ -386,6 +440,8 @@ struct Client {
 	int32_t is_in_scratchpad;
 	int32_t iscustomsize;
 	int32_t iscustompos;
+	int32_t iscustom_scroller_proportion;
+	int32_t iscustom_scroller_proportion_single;
 	int32_t is_scratchpad_show;
 	int32_t isglobal;
 	int32_t isnoborder;
@@ -395,23 +451,23 @@ struct Client {
 	int32_t isopensilent;
 	int32_t istagsilent;
 	int32_t iskilling;
-	int32_t istagswitching;
 	int32_t isnamedscratchpad;
 	int32_t is_tag_bound;
+	int32_t shield_when_capture;
 	bool is_pending_open_animation;
 	bool is_restoring_from_ov;
 	float scroller_proportion;
 	float stack_proportion;
 	float old_stack_proportion;
 	bool need_output_flush;
-	struct dwl_animation animation;
-	struct dwl_opacity_animation opacity_animation;
+	struct mango_animation animation;
+	struct mango_opacity_animation opacity_animation;
 	int32_t isterm, noswallow;
 	int32_t allow_csd;
 	int32_t force_fakemaximize;
 	int32_t force_tiled_state;
 	pid_t pid;
-	Client *swallowing, *swallowedby;
+	Client *swallowdby, *swallowing;
 	bool is_clip_to_hide;
 	bool drag_to_tile;
 	bool scratchpad_switching_mon;
@@ -426,6 +482,8 @@ struct Client {
 	float unfocused_dim;
 	char oldmonname[128];
 	int32_t noblur;
+	float blur_opacity;
+	struct wlr_ext_foreign_toplevel_handle_v1 *ext_foreign_toplevel;
 	double master_mfact_per, master_inner_per, stack_inner_per;
 	double old_master_mfact_per, old_master_inner_per, old_stack_inner_per;
 	double old_scroller_pproportion;
@@ -438,6 +496,7 @@ struct Client {
 	int32_t allow_shortcuts_inhibit;
 	float scroller_proportion_single;
 	bool isfocusing;
+	char jump_char;
 	bool enable_drop_area_draw;
 	int32_t drop_direction;
 	struct wlr_box drag_tile_float_backup_geom;
@@ -448,23 +507,15 @@ struct Client {
 	int32_t grid_col_idx;
 	int32_t grid_row_idx;
 	uint32_t id;
+	Client *group_prev;
+	Client *group_next;
+	bool isgroupfocusing;
+	bool is_logic_hide;
 };
 
 typedef struct {
-	struct wl_list link;
-	struct wl_resource *resource;
-	Monitor *mon;
-} DwlIpcOutput;
-
-typedef struct {
-	uint32_t mod;
-	xkb_keysym_t keysym;
-	int32_t (*func)(const Arg *);
-	const Arg arg;
-} Key;
-
-typedef struct {
 	struct wlr_keyboard_group *wlr_group;
+	struct wlr_keyboard *virtual_keyboard;
 
 	int32_t nsyms;
 	const xkb_keysym_t *keysyms; /* invalid if nsyms == 0 */
@@ -487,12 +538,14 @@ typedef struct {
 
 typedef struct {
 	/* Must keep these three elements in this order */
-	uint32_t type; /* LayerShell */
+	uint32_t type; // must at first in struct
 	struct wlr_box geom, current, pending, animainit_geom;
 	Monitor *mon;
 	struct wlr_scene_tree *scene;
 	struct wlr_scene_tree *popups;
+	struct wlr_scene_rect *shield;
 	struct wlr_scene_shadow *shadow;
+	struct wlr_scene_blur *blur;
 	struct wlr_scene_layer_surface_v1 *scene_layer;
 	struct wl_list link;
 	struct wl_list fadeout_link;
@@ -504,18 +557,20 @@ typedef struct {
 	struct wl_listener unmap;
 	struct wl_listener surface_commit;
 
-	struct dwl_animation animation;
+	struct mango_animation animation;
 	bool dirty;
 	int32_t noblur;
 	int32_t noanim;
 	int32_t noshadow;
 	char *animation_type_open;
 	char *animation_type_close;
+	bool shield_when_capture;
 	bool need_output_flush;
 	bool being_unmapped;
 } LayerSurface;
 
 typedef struct {
+	uint32_t type; // must at first in struct
 	struct wlr_xdg_popup *wlr_popup;
 	struct wl_listener destroy;
 	struct wl_listener commit;
@@ -549,7 +604,6 @@ struct Monitor {
 	uint32_t resizing_count_pending;
 	uint32_t resizing_count_current;
 
-	struct wl_list dwl_ipc_outputs;
 	int32_t gappih; /* horizontal gap between windows */
 	int32_t gappiv; /* vertical gap between windows */
 	int32_t gappoh; /* horizontal outer gaps */
@@ -559,8 +613,10 @@ struct Monitor {
 	uint32_t ovbk_prev_tagset;
 	Client *sel, *prevsel;
 	int32_t isoverview;
+	int32_t is_jump_mode;
 	int32_t is_in_hotarea;
-	int32_t asleep;
+	int32_t ov_normal_mode; /* 热区进入时忽略 ov_tab_mode */
+	int32_t only_sleep;
 	uint32_t visible_clients;
 	uint32_t visible_tiling_clients;
 	uint32_t visible_scroll_tiling_clients;
@@ -572,6 +628,17 @@ struct Monitor {
 	int8_t carousel_anim_dir;
 	uint32_t active_tags_mask;
 	uint32_t tags_had_clients_mask;
+	bool vrr_global_enable;
+	bool is_vrr_enabling;
+	bool hdr_enable;
+	bool prefer_disable;
+	bool is_hdr_enabling;
+	// Mastering display metadata, in cd/m². 0 = unset, see output_enable_hdr().
+	float hdr_min_lum;
+	float hdr_max_lum;
+	float hdr_max_avg_lum;
+	// Bypass the EDID-derived capability checks (DisplayID-only panels).
+	bool hdr_force;
 };
 
 typedef struct {
@@ -587,6 +654,11 @@ typedef struct {
 	struct wl_listener unlock;
 	struct wl_listener destroy;
 } SessionLock;
+
+struct capture_session_tracker {
+	struct wl_listener session_destroy;
+	struct wlr_ext_image_copy_capture_session_v1 *session;
+};
 
 typedef struct DwindleNode DwindleNode;
 struct DwindleNode {
@@ -623,6 +695,7 @@ struct TagScrollerState {
 };
 
 typedef struct {
+	uint32_t type; // must at first in struct
 	int32_t orig_width;
 	int32_t orig_height;
 	bool is_subsurface;
@@ -745,8 +818,9 @@ static void run(char *startup_cmd);
 static void setcursor(struct wl_listener *listener, void *data);
 static void setfloating(Client *c, int32_t floating);
 static void setfakefullscreen(Client *c, int32_t fakefullscreen);
-static void setfullscreen(Client *c, int32_t fullscreen);
-static void setmaximizescreen(Client *c, int32_t maximizescreen);
+static void setfullscreen(Client *c, int32_t fullscreen, bool rearrange);
+static void setmaximizescreen(Client *c, int32_t maximizescreen,
+							  bool rearrange);
 static void reset_maximizescreen_size(Client *c);
 static void setgaps(int32_t oh, int32_t ov, int32_t ih, int32_t iv);
 
@@ -772,13 +846,18 @@ static void virtualkeyboard(struct wl_listener *listener, void *data);
 static void virtualpointer(struct wl_listener *listener, void *data);
 static void warp_cursor(const Client *c);
 static Monitor *xytomon(double x, double y);
+static Monitor *get_monitor_nearest_to(int32_t x, int32_t y);
+static void handle_iamge_copy_capture_new_session(struct wl_listener *listener,
+												  void *data);
 static void xytonode(double x, double y, struct wlr_surface **psurface,
-					 Client **pc, LayerSurface **pl, double *nx, double *ny);
+					 Client **pc, LayerSurface **pl, MangoGroupBar **tb,
+					 double *nx, double *ny);
 static void clear_fullscreen_flag(Client *c);
 static pid_t getparentprocess(pid_t p);
 static int32_t isdescprocess(pid_t p, pid_t c);
 static Client *termforwin(Client *w);
-static void swallow(Client *c, Client *w);
+static void client_replace(Client *c, Client *w, bool is_group_change_member,
+						   bool is_swallow);
 
 static void warp_cursor_to_selmon(Monitor *m);
 uint32_t want_restore_fullscreen(Client *target_client);
@@ -802,7 +881,7 @@ get_nearest_output_mode(struct wlr_output *output, int32_t width,
 
 static void client_commit(Client *c);
 static void layer_commit(LayerSurface *l);
-static void apply_border(Client *c);
+static void client_draw_border(Client *c, struct ivec2 offsets);
 static void client_set_opacity(Client *c, double opacity);
 static void init_baked_points(void);
 static void scene_buffer_apply_opacity(struct wlr_scene_buffer *buffer,
@@ -815,6 +894,11 @@ static void view_in_mon(const Arg *arg, bool want_animation, Monitor *m,
 static void buffer_set_effect(Client *c, BufferData buffer_data);
 static void snap_scene_buffer_apply_effect(struct wlr_scene_buffer *buffer,
 										   int32_t sx, int32_t sy, void *data);
+static void client_send_frame_done(Client *c, const struct timespec *now);
+static void overview_layout_card(Client *c);
+static void overview_destroy_card(Client *c);
+static void overview_card_set_corner_radii(Client *c,
+										   struct fx_corner_radii corners);
 static void client_set_pending_state(Client *c);
 static void layer_set_pending_state(LayerSurface *l);
 static void set_rect_size(struct wlr_scene_rect *rect, int32_t width,
@@ -838,12 +922,13 @@ static double find_animation_curve_at(double t, int32_t type);
 
 static void apply_opacity_to_rect_nodes(Client *c, struct wlr_scene_node *node,
 										double animation_passed);
-static enum corner_location set_client_corner_location(Client *c);
+static struct fx_corner_radii set_client_corner_location(Client *c);
 static double all_output_frame_duration_ms();
 static struct wlr_scene_tree *
 wlr_scene_tree_snapshot(struct wlr_scene_node *node,
 						struct wlr_scene_tree *parent);
 static bool is_scroller_layout(Monitor *m);
+static bool is_monocle_layout(Monitor *m);
 static bool is_centertile_layout(Monitor *m);
 static void create_output(struct wlr_backend *backend, void *data);
 static void get_layout_abbr(char *abbr, const char *full_name);
@@ -865,7 +950,7 @@ static float *get_border_color(Client *c);
 static void clear_fullscreen_and_maximized_state(Monitor *m);
 static void request_fresh_all_monitors(void);
 static Client *find_client_by_direction(Client *tc, const Arg *arg,
-										bool findfloating, bool ignore_align);
+										bool findfloating);
 static void exit_scroller_stack(Client *c);
 static Client *scroll_get_stack_head_client(Client *c);
 static bool client_only_in_one_tag(Client *c);
@@ -880,8 +965,8 @@ static void last_cursor_surface_destroy(struct wl_listener *listener,
 										void *data);
 static int32_t keep_idle_inhibit(void *data);
 static void check_keep_idle_inhibit(Client *c);
-static void pre_caculate_before_arrange(Monitor *m, bool want_animation,
-										bool from_view, bool only_caculate);
+static void pre_calculate_before_arrange(Monitor *m, bool want_animation,
+										 bool from_view, bool only_calculate);
 static void client_pending_fullscreen_state(Client *c, int32_t isfullscreen);
 static void client_pending_maximized_state(Client *c, int32_t ismaximized);
 static void client_pending_minimized_state(Client *c, int32_t isminimized);
@@ -906,6 +991,26 @@ Client *scroll_get_stack_tail_client(Client *c);
 static DwindleNode *dwindle_find_leaf(DwindleNode *node, Client *c);
 static void overview_backup_surface(Client *c);
 
+static void create_jump_hints(Monitor *m);
+static void finish_jump_mode(Monitor *m);
+static void begin_jump_mode(Monitor *m);
+static void global_draw_group_bar(Client *c, int32_t x, int32_t y,
+								  int32_t width, int32_t height);
+
+static void client_reparent_group(Client *c);
+static void client_change_mon(Client *c, Monitor *m);
+static void check_vrr_enable(Client *c);
+static void output_state_setup_hdr(Monitor *m, bool silent,
+								   struct wlr_output_state *state);
+static void output_enable_hdr(Monitor *m, struct wlr_output_state *os,
+							  bool enabled, bool silent);
+static bool mango_scene_output_commit(struct wlr_scene_output *scene_output,
+									  struct wlr_output_state *state);
+static bool mango_output_commit(Monitor *m);
+static bool check_tearing_frame_allow(Monitor *m);
+static void client_set_group_config(Client *c);
+static const char *xdg_activation_v1_export_token(void);
+
 #include "data/static_keymap.h"
 #include "dispatch/bind_declare.h"
 #include "layout/layout.h"
@@ -927,7 +1032,6 @@ static struct wlr_allocator *alloc;
 static struct wlr_compositor *compositor;
 
 static struct wlr_xdg_shell *xdg_shell;
-static struct wlr_xdg_activation_v1 *activation;
 static struct wlr_xdg_decoration_manager_v1 *xdg_decoration_mgr;
 static struct wl_list clients; /* tiling order */
 static struct wl_list fstack;  /* focus order */
@@ -943,6 +1047,7 @@ static struct wlr_keyboard_shortcuts_inhibit_manager_v1
 	*keyboard_shortcuts_inhibit;
 static struct wlr_virtual_pointer_manager_v1 *virtual_pointer_mgr;
 static struct wlr_output_power_manager_v1 *power_mgr;
+static struct wlr_ext_image_copy_capture_manager_v1 *ext_image_copy_capture_mgr;
 static struct wlr_pointer_gestures_v1 *pointer_gestures;
 static struct wlr_drm_lease_v1_manager *drm_lease_manager;
 struct mango_print_status_manager *print_status_manager;
@@ -969,7 +1074,13 @@ static struct wl_list keyboard_shortcut_inhibitors;
 static uint32_t cursor_mode;
 static Client *grabc, *dropc;
 static int32_t rzcorner;
-static int32_t grabcx, grabcy;						   /* client-relative */
+static int32_t grabcx, grabcy; /* client-relative */
+
+static struct wlr_ext_foreign_toplevel_image_capture_source_manager_v1
+	*ext_foreign_toplevel_image_capture_source_manager_v1;
+static struct wl_listener new_foreign_toplevel_capture_request;
+static struct wlr_ext_foreign_toplevel_list_v1 *foreign_toplevel_list;
+
 static int32_t drag_begin_cursorx, drag_begin_cursory; /* client-relative */
 static bool start_drag_window = false;
 static int32_t last_apply_drap_time = 0;
@@ -978,6 +1089,7 @@ static struct wlr_output_layout *output_layout;
 static struct wlr_box sgeom;
 static struct wl_list mons;
 static Monitor *selmon;
+static struct wlr_scene_output_layout *scene_layout;
 
 static int32_t enablegaps = 1; /* enables gaps, used by togglegaps */
 static int32_t axis_apply_time = 0;
@@ -1006,7 +1118,8 @@ static struct wl_event_source *hide_cursor_source;
 static struct wl_event_source *keep_idle_inhibit_source;
 static bool cursor_hidden = false;
 static bool tag_combo = false;
-static const char *cli_config_path = NULL;
+static char cli_config_path[1024] = {0};
+static int active_capture_count = 0;
 static bool cli_debug_log = false;
 static KeyMode keymode = {
 	.mode = {'d', 'e', 'f', 'a', 'u', 'l', 't', '\0'},
@@ -1037,10 +1150,14 @@ struct Pertag {
 	int32_t no_hide[LENGTH(tags) + 1];
 	int32_t no_render_border[LENGTH(tags) + 1];
 	int32_t open_as_floating[LENGTH(tags) + 1];
+	float scroller_default_proportion[LENGTH(tags) + 1];
+	float scroller_default_proportion_single[LENGTH(tags) + 1];
+	int32_t scroller_ignore_proportion_single[LENGTH(tags) + 1];
 	struct DwindleNode *dwindle_root[LENGTH(tags) + 1];
 	const Layout *ltidxs[LENGTH(tags) + 1];
 	struct TagScrollerState *scroller_state[LENGTH(tags) + 1];
 };
+#include "common/log.h"
 #include "config/parse_config.h"
 
 static struct wl_signal mango_print_status;
@@ -1069,7 +1186,8 @@ static struct wl_listener output_mgr_apply = {.notify = outputmgrapply};
 static struct wl_listener output_mgr_test = {.notify = outputmgrtest};
 static struct wl_listener output_power_mgr_set_mode = {.notify =
 														   powermgrsetmode};
-static struct wl_listener request_activate = {.notify = urgent};
+static struct wl_listener ext_image_copy_capture_mgr_new_session = {
+	.notify = handle_iamge_copy_capture_new_session};
 static struct wl_listener request_cursor = {.notify = setcursor};
 static struct wl_listener request_set_psel = {.notify = setpsel};
 static struct wl_listener request_set_sel = {.notify = setsel};
@@ -1084,7 +1202,13 @@ static struct wl_listener last_cursor_surface_destroy_listener = {
 	.notify = last_cursor_surface_destroy};
 
 #ifdef XWAYLAND
-static void fix_xwayland_unmanaged_coordinate(Client *c);
+static float xwayland_client_scale(Client *c);
+static float xwayland_preferred_scale(Client *c);
+static void xwayland_apply_scale(Client *c);
+static void xwayland_logical_to_x11(struct wlr_box *box, float scale);
+static void xwayland_x11_to_logical(struct wlr_box *box, float scale);
+static void xwayland_scene_commit(struct wl_listener *listener, void *data);
+static void fix_xwayland_coordinate(struct wlr_box *geom);
 static int32_t synckeymap(void *data);
 static void activatex11(struct wl_listener *listener, void *data);
 static void configurex11(struct wl_listener *listener, void *data);
@@ -1104,7 +1228,10 @@ static struct wl_event_source *sync_keymap;
 char *pending_scratchpad_mark = NULL;
 int32_t pending_scratchpad_is_tag_bound = 0;
 
+/* export an activation token for the process we're about to spawn */
+
 #include "action/client.h"
+#include "action/monitor.h"
 #include "animation/client.h"
 #include "animation/common.h"
 #include "animation/layer.h"
@@ -1112,6 +1239,7 @@ int32_t pending_scratchpad_is_tag_bound = 0;
 #include "dispatch/bind_define.h"
 #include "ext-protocol/all.h"
 #include "fetch/fetch.h"
+#include "input/touch.h"
 #include "ipc/ipc.h"
 #include "layout/arrange.h"
 #include "layout/dwindle.h"
@@ -1119,6 +1247,7 @@ int32_t pending_scratchpad_is_tag_bound = 0;
 #include "layout/overview.h"
 #include "layout/scroll.h"
 #include "layout/vertical.h"
+#include "overview/overview.h"
 
 void client_change_mon(Client *c, Monitor *m) {
 	setmon(c, m, c->tags, true);
@@ -1130,8 +1259,8 @@ void client_change_mon(Client *c, Monitor *m) {
 
 void applybounds(Client *c, struct wlr_box *bbox) {
 	/* set minimum possible */
-	c->geom.width = MAX(1 + 2 * (int32_t)c->bw, c->geom.width);
-	c->geom.height = MAX(1 + 2 * (int32_t)c->bw, c->geom.height);
+	c->geom.width = MANGO_MAX(1 + 2 * (int32_t)c->bw, c->geom.width);
+	c->geom.height = MANGO_MAX(1 + 2 * (int32_t)c->bw, c->geom.height);
 
 	if (c->geom.x >= bbox->x + bbox->width)
 		c->geom.x = bbox->x + bbox->width - c->geom.width;
@@ -1164,11 +1293,11 @@ void clear_fullscreen_flag(Client *c) {
 	}
 
 	if (c->isfullscreen) {
-		setfullscreen(c, false);
+		setfullscreen(c, false, true);
 	}
 
 	if (c->ismaximizescreen) {
-		setmaximizescreen(c, 0);
+		setmaximizescreen(c, 0, true);
 	}
 }
 
@@ -1219,8 +1348,7 @@ void show_scratchpad(Client *c) {
 	}
 
 	c->oldtags = c->mon->tagset[c->mon->seltags];
-	wl_list_remove(&c->link);					  // 从原来位置移除
-	wl_list_insert(clients.prev->next, &c->link); // 插入开头
+	wl_list_safe_reinsert_next(&clients, &c->link);
 	show_hide_client(c);
 	setborder_color(c);
 }
@@ -1233,7 +1361,8 @@ void client_update_oldmonname_record(Client *c, Monitor *m) {
 	c->oldmonname[sizeof(c->oldmonname) - 1] = '\0';
 }
 
-void swallow(Client *c, Client *w) {
+void client_replace(Client *c, Client *w, bool is_group_change_member,
+					bool is_swallow) {
 	c->bw = w->bw;
 	c->isfloating = w->isfloating;
 	c->isurgent = w->isurgent;
@@ -1248,23 +1377,46 @@ void swallow(Client *c, Client *w) {
 	c->scroller_proportion = w->scroller_proportion;
 	c->isglobal = w->isglobal;
 	c->overview_backup_geom = w->overview_backup_geom;
-
-	/* 调整 w 的邻居指针，让它们指向 c */
+	c->animation.current = w->animation.current;
 	c->stack_proportion = w->stack_proportion;
+	c->is_logic_hide = w->is_logic_hide;
 
+	if (is_swallow || !is_group_change_member) {
+		client_group_replace(w, c);
+	}
+
+	w->is_logic_hide = true;
+	mango_group_bar_set_focus(c->group_bar, c->isgroupfocusing);
+
+	/* 若旧窗口处于 overview：销毁其卡片树 */
+	overview_destroy_card(w);
 	if (w->overview_scene_surface) {
-		wlr_scene_node_destroy(&w->scene_surface->node);
-		w->scene_surface = w->overview_scene_surface;
 		w->overview_scene_surface = NULL;
 	}
 
-	if (c->mon && c->mon->isoverview && config.ov_no_resize) {
+	if (c->mon && c->mon->isoverview) {
 		overview_backup_surface(c);
 	}
 
-	/* 全局链表替换 */
-	wl_list_insert(&w->link, &c->link);
-	wl_list_insert(&w->flink, &c->flink);
+	if (w->group_bar && !is_group_change_member) {
+		wlr_scene_node_set_enabled(&w->group_bar->scene_buffer->node, false);
+	}
+
+	if (w->jump_label_node) {
+		wlr_scene_node_set_enabled(&w->jump_label_node->scene_buffer->node,
+								   false);
+	}
+
+	wl_list_safe_reinsert_next(&w->link, &c->link);
+	wl_list_safe_reinsert_prev(&w->flink, &c->flink);
+	wlr_scene_node_set_enabled(&w->scene->node, false);
+
+	if (!c->is_logic_hide) {
+		wlr_scene_node_set_enabled(&c->scene->node, true);
+		/* overview 中真实 surface 树由卡片树替代，保持禁用 */
+		if (!c->ov_card_tree)
+			wlr_scene_node_set_enabled(&c->scene_surface->node, true);
+	}
 
 	if (w->foreign_toplevel) {
 		wlr_foreign_toplevel_handle_v1_output_leave(w->foreign_toplevel,
@@ -1272,10 +1424,6 @@ void swallow(Client *c, Client *w) {
 		wlr_foreign_toplevel_handle_v1_destroy(w->foreign_toplevel);
 		w->foreign_toplevel = NULL;
 	}
-
-	wlr_scene_node_set_enabled(&w->scene->node, false);
-	wlr_scene_node_set_enabled(&c->scene->node, true);
-	wlr_scene_node_set_enabled(&c->scene_surface->node, true);
 
 	if (!c->foreign_toplevel && c->mon)
 		add_foreign_toplevel(c);
@@ -1296,7 +1444,7 @@ void swallow(Client *c, Client *w) {
 	if (layout->id == DWINDLE || layout->id == SCROLLER ||
 		layout->id == VERTICAL_SCROLLER) {
 
-		for (uint32_t t = 0; t < LENGTH(tags) + 1; t++) {
+		for (uint32_t t = 0; t < (uint32_t)config.tag_num + 1; t++) {
 			/* dwindle */
 
 			if (layout->id == DWINDLE) {
@@ -1313,12 +1461,10 @@ void swallow(Client *c, Client *w) {
 				struct TagScrollerState *st = w->mon->pertag->scroller_state[t];
 				if (!st)
 					continue;
-				/* 先移除 c 在任意 tag 中的旧节点 */
 				struct ScrollerStackNode *cn = find_scroller_node(st, c);
 				if (cn)
 					scroller_node_remove(st, cn);
 
-				/* 将 w 的节点（如果存在）转给 c */
 				struct ScrollerStackNode *wn = find_scroller_node(st, w);
 				if (wn)
 					wn->client = c;
@@ -1357,7 +1503,7 @@ bool switch_scratchpad_client_state(Client *c) {
 			c->tags = get_tags_first_tag(selmon->tagset[selmon->seltags]);
 			resize(c, c->float_geom, 0);
 			arrange(selmon, false, false);
-			focusclient(c, true);
+			focusclient(c, 1);
 			c->scratchpad_switching_mon = false;
 			return true;
 		} else {
@@ -1366,11 +1512,11 @@ bool switch_scratchpad_client_state(Client *c) {
 		}
 	}
 
-	if (c->is_in_scratchpad && c->is_scratchpad_show &&
+	if (c->is_in_scratchpad && c->is_scratchpad_show && c->mon &&
 		(c->mon->tagset[c->mon->seltags] & c->tags) == 0) {
 		c->tags = c->mon->tagset[c->mon->seltags];
 		arrange(c->mon, false, false);
-		focusclient(c, true);
+		focusclient(c, 1);
 		return true;
 	} else if (c->is_in_scratchpad && c->is_scratchpad_show &&
 			   (c->mon->tagset[c->mon->seltags] & c->tags) != 0) {
@@ -1410,7 +1556,7 @@ void gpureset(struct wl_listener *listener, void *data) {
 	struct wlr_allocator *old_alloc = alloc;
 	struct Monitor *m = NULL;
 
-	wlr_log(WLR_DEBUG, "gpu reset");
+	mango_error(true, WLR_DEBUG, "gpu reset");
 
 	if (!(drw = fx_renderer_create(backend)))
 		die("couldn't recreate renderer");
@@ -1501,6 +1647,8 @@ void toggle_hotarea(int32_t x_root, int32_t y_root) {
 
 	if (config.enable_hotarea == 1 && selmon->is_in_hotarea == 0 &&
 		in_hotarea) {
+		/* 热区进入：忽略 ov_tab_mode */
+		selmon->ov_normal_mode = 1;
 		toggleoverview(&arg);
 		selmon->is_in_hotarea = 1;
 	} else if (config.enable_hotarea == 1 && selmon->is_in_hotarea == 1 &&
@@ -1532,10 +1680,14 @@ static void apply_rule_properties(Client *c, const ConfigWinRule *r) {
 	APPLY_INT_PROP(c, r, isnamedscratchpad);
 	APPLY_INT_PROP(c, r, isglobal);
 	APPLY_INT_PROP(c, r, isoverlay);
+	APPLY_INT_PROP(c, r, shield_when_capture);
 	APPLY_INT_PROP(c, r, ignore_maximize);
 	APPLY_INT_PROP(c, r, ignore_minimize);
 	APPLY_INT_PROP(c, r, isnosizehint);
 	APPLY_INT_PROP(c, r, idleinhibit_when_focus);
+	APPLY_INT_PROP(c, r, vrr_only_fullscreen);
+	APPLY_INT_PROP(c, r, force_render);
+	APPLY_INT_PROP(c, r, activation_bypass);
 	APPLY_INT_PROP(c, r, isunglobal);
 	APPLY_INT_PROP(c, r, noblur);
 	APPLY_INT_PROP(c, r, allow_shortcuts_inhibit);
@@ -1558,7 +1710,11 @@ void set_float_malposition(Client *tc) {
 	y = tc->geom.y;
 	xreverse = 1;
 	yreverse = 1;
-	offset = MIN(tc->mon->w.width / 20, tc->mon->w.height / 20);
+
+	if (!tc || !tc->mon)
+		return;
+
+	offset = MANGO_MIN(tc->mon->w.width / 20, tc->mon->w.height / 20);
 
 	wl_list_for_each(c, &clients, link) {
 		if (c->isfloating && c != tc && VISIBLEON(c, tc->mon) &&
@@ -1602,14 +1758,15 @@ void client_reset_mon_tags(Client *c, Monitor *mon, uint32_t newtags) {
 	} else if (!newtags && mon && mon->isoverview) {
 		c->tags = mon->ovbk_current_tagset;
 	} else if (newtags) {
-		c->tags = newtags;
+		uint32_t masked = newtags & TAGMASK;
+		c->tags = masked ? masked : mon->tagset[mon->seltags];
 	} else {
 		c->tags = mon->tagset[mon->seltags];
 	}
 }
 
 void check_match_tag_floating_rule(Client *c, Monitor *mon) {
-	if (c->tags && !c->isfloating && mon && !c->swallowedby &&
+	if (c->tags && !c->isfloating && mon && !c->swallowing &&
 		mon->pertag->open_as_floating[get_tags_first_tag_num(c->tags)]) {
 		c->isfloating = 1;
 	}
@@ -1644,9 +1801,14 @@ void applyrules(Client *c) {
 	c->isfloating = client_is_float_type(c) || parent;
 
 #ifdef XWAYLAND
-	if (c->isfloating && client_is_x11(c)) {
-		fix_xwayland_unmanaged_coordinate(c);
-		c->float_geom = c->geom;
+	if (client_is_x11(c)) {
+		/* 先确定 xwayland_scale 再取几何，否则拿到的是物理尺寸 */
+		xwayland_apply_scale(c);
+		client_get_geometry(c, &c->geom);
+		if (c->isfloating) {
+			fix_xwayland_coordinate(&c->geom);
+			c->float_geom = c->geom;
+		}
 	}
 #endif
 
@@ -1689,6 +1851,14 @@ void applyrules(Client *c) {
 			c->isfloating = 1;
 		}
 
+		if (r->scroller_proportion > 0.0f) {
+			c->iscustom_scroller_proportion = 1;
+		}
+
+		if (r->scroller_proportion_single > 0.0f) {
+			c->iscustom_scroller_proportion_single = 1;
+		}
+
 		// set geometry of floating client
 
 		if (r->width > 1)
@@ -1725,9 +1895,11 @@ void applyrules(Client *c) {
 	// the hit size
 	if (!c->iscustompos &&
 		(!client_is_x11(c) || (c->geom.x == 0 && c->geom.y == 0))) {
+		struct wlr_box pending_center_geom =
+			c->iscustomsize ? c->float_geom : c->geom;
 		c->float_geom = c->geom =
-			setclient_coordinate_center(c, mon, c->geom, 0, 0);
-	} else {
+			setclient_coordinate_center(c, mon, pending_center_geom, 0, 0);
+	} else if (!c->iscustomsize) {
 		c->float_geom = c->geom;
 	}
 
@@ -1744,13 +1916,11 @@ void applyrules(Client *c) {
 		!c->surface.xdg->initial_commit) {
 		Client *p = termforwin(c);
 		if (p && !p->isminimized) {
-			c->swallowedby = p;
-			p->swallowing = c;
-			wl_list_remove(&c->link);
-			wl_list_remove(&c->flink);
-			swallow(c, p);
-			wl_list_remove(&p->link);
-			wl_list_remove(&p->flink);
+			c->swallowing = p;
+			p->swallowdby = c;
+
+			client_replace(c, p, false, true);
+
 			mon = p->mon;
 			newtags = p->tags;
 		}
@@ -1765,8 +1935,7 @@ void applyrules(Client *c) {
 		(!c->istagsilent || !newtags || newtags & mon->tagset[mon->seltags]);
 
 	if (!should_init_get_focus) {
-		wl_list_remove(&c->flink);
-		wl_list_insert(fstack.prev, &c->flink);
+		wl_list_safe_reinsert_prev(&fstack, &c->flink);
 	}
 
 	setmon(c, mon, newtags, should_init_get_focus);
@@ -1783,7 +1952,7 @@ void applyrules(Client *c) {
 		view_in_mon(&(Arg){.ui = c->tags}, true, c->mon, true);
 	}
 
-	setfullscreen(c, fullscreen_state_backup);
+	setfullscreen(c, fullscreen_state_backup, true);
 
 	if (c->isfakefullscreen) {
 		setfakefullscreen(c, 1);
@@ -1802,8 +1971,7 @@ void applyrules(Client *c) {
 	}
 
 	if (c->isfloating && !c->iscustompos && !c->isnamedscratchpad) {
-		wl_list_remove(&c->link);
-		wl_list_insert(clients.prev, &c->link);
+		wl_list_safe_reinsert_prev(&clients, &c->link);
 		set_float_malposition(c);
 	}
 
@@ -1946,7 +2114,8 @@ void apply_window_snap(Client *c) {
 
 void focuslayer(LayerSurface *l) {
 	focusclient(NULL, 0);
-	dwl_im_relay_set_focus(dwl_input_method_relay, l->layer_surface->surface);
+	mango_im_relay_set_focus(mango_input_method_relay,
+							 l->layer_surface->surface);
 	client_notify_enter(l->layer_surface->surface, wlr_seat_get_keyboard(seat));
 }
 
@@ -2080,7 +2249,9 @@ axisnotify(struct wl_listener *listener, void *data) {
 		if (config.axis_bindings_count < 1)
 			break;
 		a = &config.axis_bindings[ji];
-		if (CLEANMASK(mods) == CLEANMASK(a->mod) && // 按键一致
+		if ((a->iscommonmode || (a->isdefaultmode && keymode.isdefault) ||
+			 (strcmp(keymode.mode, a->mode) == 0)) &&
+			CLEANMASK(mods) == CLEANMASK(a->mod) && // 按键一致
 			adir == a->dir && a->func) { // 滚轮方向判断一致且处理函数存在
 			if (event->time_msec - axis_apply_time >
 					config.axis_bind_apply_timeout ||
@@ -2152,7 +2323,9 @@ int32_t ongesture(struct wlr_pointer_swipe_end_event *event) {
 		if (config.gesture_bindings_count < 1)
 			break;
 		g = &config.gesture_bindings[ji];
-		if (CLEANMASK(mods) == CLEANMASK(g->mod) &&
+		if ((g->iscommonmode || (g->isdefaultmode && keymode.isdefault) ||
+			 (strcmp(keymode.mode, g->mode) == 0)) &&
+			CLEANMASK(mods) == CLEANMASK(g->mod) &&
 			swipe_fingers == g->fingers_count && motion == g->motion &&
 			g->func) {
 			g->func(&g->arg);
@@ -2165,6 +2338,10 @@ int32_t ongesture(struct wlr_pointer_swipe_end_event *event) {
 void swipe_begin(struct wl_listener *listener, void *data) {
 	struct wlr_pointer_swipe_begin_event *event = data;
 
+	if (config.disable_trackpad) {
+		return;
+	}
+
 	// Forward swipe begin event to client
 	wlr_pointer_gestures_v1_send_swipe_begin(pointer_gestures, seat,
 											 event->time_msec, event->fingers);
@@ -2172,6 +2349,10 @@ void swipe_begin(struct wl_listener *listener, void *data) {
 
 void swipe_update(struct wl_listener *listener, void *data) {
 	struct wlr_pointer_swipe_update_event *event = data;
+
+	if (config.disable_trackpad) {
+		return;
+	}
 
 	swipe_fingers = event->fingers;
 	// Accumulate swipe distance
@@ -2185,6 +2366,11 @@ void swipe_update(struct wl_listener *listener, void *data) {
 
 void swipe_end(struct wl_listener *listener, void *data) {
 	struct wlr_pointer_swipe_end_event *event = data;
+
+	if (config.disable_trackpad) {
+		return;
+	}
+
 	ongesture(event);
 	swipe_dx = 0;
 	swipe_dy = 0;
@@ -2196,6 +2382,10 @@ void swipe_end(struct wl_listener *listener, void *data) {
 void pinch_begin(struct wl_listener *listener, void *data) {
 	struct wlr_pointer_pinch_begin_event *event = data;
 
+	if (config.disable_trackpad) {
+		return;
+	}
+
 	// Forward pinch begin event to client
 	wlr_pointer_gestures_v1_send_pinch_begin(pointer_gestures, seat,
 											 event->time_msec, event->fingers);
@@ -2203,6 +2393,10 @@ void pinch_begin(struct wl_listener *listener, void *data) {
 
 void pinch_update(struct wl_listener *listener, void *data) {
 	struct wlr_pointer_pinch_update_event *event = data;
+
+	if (config.disable_trackpad) {
+		return;
+	}
 
 	// Forward pinch update event to client
 	wlr_pointer_gestures_v1_send_pinch_update(
@@ -2213,6 +2407,10 @@ void pinch_update(struct wl_listener *listener, void *data) {
 void pinch_end(struct wl_listener *listener, void *data) {
 	struct wlr_pointer_pinch_end_event *event = data;
 
+	if (config.disable_trackpad) {
+		return;
+	}
+
 	// Forward pinch end event to client
 	wlr_pointer_gestures_v1_send_pinch_end(pointer_gestures, seat,
 										   event->time_msec, event->cancelled);
@@ -2220,6 +2418,10 @@ void pinch_end(struct wl_listener *listener, void *data) {
 
 void hold_begin(struct wl_listener *listener, void *data) {
 	struct wlr_pointer_hold_begin_event *event = data;
+
+	if (config.disable_trackpad) {
+		return;
+	}
 
 	// Forward hold begin event to client
 	wlr_pointer_gestures_v1_send_hold_begin(pointer_gestures, seat,
@@ -2229,6 +2431,10 @@ void hold_begin(struct wl_listener *listener, void *data) {
 void hold_end(struct wl_listener *listener, void *data) {
 	struct wlr_pointer_hold_end_event *event = data;
 
+	if (config.disable_trackpad) {
+		return;
+	}
+
 	// Forward hold end event to client
 	wlr_pointer_gestures_v1_send_hold_end(pointer_gestures, seat,
 										  event->time_msec, event->cancelled);
@@ -2237,9 +2443,10 @@ void hold_end(struct wl_listener *listener, void *data) {
 Client *find_closest_tiled_client(Client *c) {
 	Client *tc, *closest = NULL;
 	long min_dist = LONG_MAX;
+	Monitor *cursor_mon = xytomon(cursor->x, cursor->y);
 
 	wl_list_for_each(tc, &clients, link) {
-		if (tc == c || !ISTILED(tc) || !VISIBLEON(tc, c->mon))
+		if (tc == c || !ISTILED(tc) || !VISIBLEON(tc, cursor_mon))
 			continue;
 
 		if (cursor->x >= tc->geom.x &&
@@ -2271,7 +2478,8 @@ void place_drag_tile_client(Client *c) {
 
 		if (closest->drop_direction == UNDIR) {
 			setfloating(c, 0);
-			exchange_two_client(c, closest);
+			wl_list_safe_reinsert_prev(&closest->link, &c->link);
+			arrange(closest->mon, false, false);
 			return;
 		}
 
@@ -2296,12 +2504,24 @@ void place_drag_tile_client(Client *c) {
 			return;
 		}
 
+		if (layout->id == RIGHT_TILE) {
+			if (closest->drop_direction == LEFT) {
+				wl_list_safe_reinsert_next(&closest->link, &c->link);
+			} else if (closest->drop_direction == RIGHT) {
+				wl_list_safe_reinsert_prev(&closest->link, &c->link);
+			} else if (closest->drop_direction == UP) {
+				wl_list_safe_reinsert_prev(&closest->link, &c->link);
+			} else {
+				wl_list_safe_reinsert_next(&closest->link, &c->link);
+			}
+			setfloating(c, 0);
+			return;
+		}
+
 		if (closest->drop_direction == LEFT || closest->drop_direction == UP) {
-			wl_list_remove(&c->link);
-			wl_list_insert(closest->link.prev, &c->link);
+			wl_list_safe_reinsert_prev(&closest->link, &c->link);
 		} else {
-			wl_list_remove(&c->link);
-			wl_list_insert(&closest->link, &c->link);
+			wl_list_safe_reinsert_next(&closest->link, &c->link);
 		}
 	}
 
@@ -2330,6 +2550,7 @@ bool handle_buttonpress(struct wlr_pointer_button_event *event) {
 	uint32_t hard_mods, mods;
 	Client *c = NULL;
 	LayerSurface *l = NULL;
+	MangoGroupBar *gb = NULL;
 	struct wlr_surface *surface;
 	Client *tmpc = NULL;
 	int32_t ji;
@@ -2357,9 +2578,9 @@ bool handle_buttonpress(struct wlr_pointer_button_event *event) {
 		if (locked)
 			break;
 
-		xytonode(cursor->x, cursor->y, &surface, NULL, NULL, NULL, NULL);
+		xytonode(cursor->x, cursor->y, &surface, NULL, NULL, &gb, NULL, NULL);
 		if (toplevel_from_wlr_surface(surface, &c, &l) >= 0) {
-			if (c && c->scene->node.enabled &&
+			if (c && c->scene && c->scene->node.enabled &&
 				(!client_is_unmanaged(c) || client_wants_focus(c)))
 				focusclient(c, 1);
 
@@ -2375,6 +2596,20 @@ bool handle_buttonpress(struct wlr_pointer_button_event *event) {
 				focuslayer(l);
 			}
 		}
+
+		// overview模式下鼠标左键跳转，右键关闭窗口
+		if (selmon && selmon->isoverview && event->button == BTN_LEFT && c) {
+			toggleoverview(&(Arg){.i = 1});
+			return true;
+		}
+
+		if (selmon && selmon->isoverview && event->button == BTN_RIGHT && c) {
+			pending_kill_client(c);
+			return true;
+		}
+
+		// handle click on tile node
+		client_handle_decorate_click(gb);
 
 		// 当鼠标焦点在layer上的时候，不检测虚拟键盘的mod状态，
 		// 避免layer虚拟键盘锁死mod按键状态
@@ -2392,17 +2627,9 @@ bool handle_buttonpress(struct wlr_pointer_button_event *event) {
 				break;
 			m = &config.mouse_bindings[ji];
 
-			if (selmon->isoverview && event->button == BTN_LEFT && c) {
-				toggleoverview(&(Arg){.i = 1});
-				return true;
-			}
-
-			if (selmon->isoverview && event->button == BTN_RIGHT && c) {
-				pending_kill_client(c);
-				return true;
-			}
-
-			if (CLEANMASK(mods) == CLEANMASK(m->mod) &&
+			if ((m->iscommonmode || (m->isdefaultmode && keymode.isdefault) ||
+				 (strcmp(keymode.mode, m->mode) == 0)) &&
+				CLEANMASK(mods) == CLEANMASK(m->mod) &&
 				event->button == m->button && m->func &&
 				(CLEANMASK(m->mod) != 0 ||
 				 (event->button != BTN_LEFT && event->button != BTN_RIGHT))) {
@@ -2427,6 +2654,10 @@ bool handle_buttonpress(struct wlr_pointer_button_event *event) {
 			selmon = xytomon(cursor->x, cursor->y);
 			client_update_oldmonname_record(grabc, selmon);
 			setmon(grabc, selmon, 0, true);
+			/* if the view changed mid-drag, drop onto the current tag
+			 * instead of silently returning to the original one */
+			if (!VISIBLEON(grabc, selmon))
+				grabc->tags = selmon->tagset[selmon->seltags];
 			selmon->prevsel = ISTILED(selmon->sel) ? selmon->sel : NULL;
 			selmon->sel = grabc;
 			tmpc = grabc;
@@ -2519,6 +2750,11 @@ void cleanuplisteners(void) {
 	wl_list_remove(&cursor_frame.link);
 	wl_list_remove(&cursor_motion.link);
 	wl_list_remove(&cursor_motion_absolute.link);
+	wl_list_remove(&cursor_touch_down.link);
+	wl_list_remove(&cursor_touch_up.link);
+	wl_list_remove(&cursor_touch_cancel.link);
+	wl_list_remove(&cursor_touch_motion.link);
+	wl_list_remove(&cursor_touch_frame.link);
 	wl_list_remove(&tablet_tool_proximity.link);
 	wl_list_remove(&tablet_tool_axis.link);
 	wl_list_remove(&tablet_tool_button.link);
@@ -2538,7 +2774,6 @@ void cleanuplisteners(void) {
 	wl_list_remove(&output_mgr_apply.link);
 	wl_list_remove(&output_mgr_test.link);
 	wl_list_remove(&output_power_mgr_set_mode.link);
-	wl_list_remove(&request_activate.link);
 	wl_list_remove(&request_cursor.link);
 	wl_list_remove(&request_set_psel.link);
 	wl_list_remove(&request_set_sel.link);
@@ -2546,8 +2781,10 @@ void cleanuplisteners(void) {
 	wl_list_remove(&request_start_drag.link);
 	wl_list_remove(&start_drag.link);
 	wl_list_remove(&new_session_lock.link);
+	wl_list_remove(&new_foreign_toplevel_capture_request.link);
 	wl_list_remove(&tearing_new_object.link);
 	wl_list_remove(&keyboard_shortcuts_inhibit_new_inhibitor.link);
+	wl_list_remove(&ext_image_copy_capture_mgr_new_session.link);
 	if (drm_lease_manager) {
 		wl_list_remove(&drm_lease_request.link);
 	}
@@ -2558,6 +2795,8 @@ void cleanuplisteners(void) {
 }
 
 void cleanup(void) {
+	allow_frame_scheduling = false;
+
 	ipc_cleanup();
 	cleanuplisteners();
 #ifdef XWAYLAND
@@ -2574,7 +2813,7 @@ void cleanup(void) {
 
 	destroykeyboardgroup(&kb_group->destroy, NULL);
 
-	dwl_im_relay_finish(dwl_input_method_relay);
+	mango_im_relay_finish(mango_input_method_relay);
 
 	/* If it's not destroyed manually it will cause a use-after-free of
 	 * wlr_seat. Destroy it until it's fixed in the wlroots side */
@@ -2584,6 +2823,8 @@ void cleanup(void) {
 	/* Destroy after the wayland display (when the monitors are already
 	   destroyed) to avoid destroying them with an invalid scene output. */
 	wlr_scene_node_destroy(&scene->tree.node);
+
+	mango_text_global_finish();
 }
 
 void cleanupmon(struct wl_listener *listener, void *data) {
@@ -2611,8 +2852,9 @@ void cleanupmon(struct wl_listener *listener, void *data) {
 	if (m->lock_surface)
 		destroylocksurface(&m->destroy_lock_surface, NULL);
 	m->wlr_output->data = NULL;
-	wlr_output_layout_remove(output_layout, m->wlr_output);
+
 	wlr_scene_output_destroy(m->scene_output);
+	wlr_output_layout_remove(output_layout, m->wlr_output);
 
 	closemon(m);
 	if (m->blur) {
@@ -2625,6 +2867,7 @@ void cleanupmon(struct wl_listener *listener, void *data) {
 		m->skip_frame_timeout = NULL;
 	}
 	m->wlr_output->data = NULL;
+	xdg_output_cleanup_output(m->wlr_output);
 
 	cleanup_monitor_dwindle(m);
 	cleanup_monitor_scroller(m);
@@ -2640,6 +2883,10 @@ void closemon(Monitor *m) {
 	int32_t i = 0, nmons = wl_list_length(&mons);
 	uint32_t tag_mapping[32] = {0};
 	is_migration_active = true;
+
+	if (m->isoverview) {
+		toggleoverview(&(Arg){.i = 1});
+	}
 
 	if (!nmons) {
 		selmon = NULL;
@@ -2664,7 +2911,7 @@ void closemon(Monitor *m) {
 					c->foreign_toplevel = NULL;
 				}
 
-				c->mon = NULL;
+				client_set_group_mon(c, NULL);
 			} else {
 				// Reasignar tags dinámicos si están ocupados en selmon
 				uint32_t newtags = 0;
@@ -2726,6 +2973,7 @@ void closemon(Monitor *m) {
 				}
 
 				client_change_mon(c, selmon);
+				client_set_group_mon(c, selmon);
 			}
 			// record the oldmonname which is used to restore
 			if (c->oldmonname[0] == '\0') {
@@ -2748,12 +2996,16 @@ static void iter_layer_scene_buffers(struct wlr_scene_buffer *buffer,
 		return;
 	}
 
-	wlr_scene_buffer_set_backdrop_blur(buffer, true);
-	wlr_scene_buffer_set_backdrop_blur_ignore_transparent(buffer, true);
+	LayerSurface *l = (LayerSurface *)user_data;
+
+	wlr_scene_node_set_enabled(&l->blur->node, true);
+	wlr_scene_blur_set_transparency_mask_source(l->blur, buffer);
+	wlr_scene_blur_set_size(l->blur, l->geom.width, l->geom.height);
+
 	if (config.blur_optimized) {
-		wlr_scene_buffer_set_backdrop_blur_optimized(buffer, true);
+		wlr_scene_blur_set_should_only_blur_bottom_layer(l->blur, true);
 	} else {
-		wlr_scene_buffer_set_backdrop_blur_optimized(buffer, false);
+		wlr_scene_blur_set_should_only_blur_bottom_layer(l->blur, false);
 	}
 }
 
@@ -2790,6 +3042,7 @@ void maplayersurfacenotify(struct wl_listener *listener, void *data) {
 
 	l->noanim = 0;
 	l->dirty = false;
+	l->shield_when_capture = false;
 	l->noblur = 0;
 	l->shadow = NULL;
 	l->need_output_flush = true;
@@ -2802,6 +3055,7 @@ void maplayersurfacenotify(struct wl_listener *listener, void *data) {
 						l->layer_surface->namespace)) {
 
 			r = &config.layer_rules[ji];
+			APPLY_INT_PROP(l, r, shield_when_capture);
 			APPLY_INT_PROP(l, r, noblur);
 			APPLY_INT_PROP(l, r, noanim);
 			APPLY_INT_PROP(l, r, noshadow);
@@ -2810,15 +3064,26 @@ void maplayersurfacenotify(struct wl_listener *listener, void *data) {
 		}
 	}
 
+	// 初始化屏蔽
+	l->shield =
+		wlr_scene_rect_create(l->scene, 0, 0, (float[4]){0, 0, 0, 0xff});
+	l->shield->node.data = l;
+	wlr_scene_node_lower_to_bottom(&l->shield->node);
+	wlr_scene_node_set_enabled(&l->shield->node, false);
+
 	// 初始化阴影
-	if (layer_surface->current.exclusive_zone == 0 &&
-		layer_surface->current.layer != ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM &&
+	if (layer_surface->current.layer != ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM &&
 		layer_surface->current.layer != ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND) {
-		l->shadow =
-			wlr_scene_shadow_create(l->scene, 0, 0, config.border_radius,
-									config.shadows_blur, config.shadowscolor);
-		wlr_scene_node_lower_to_bottom(&l->shadow->node);
-		wlr_scene_node_set_enabled(&l->shadow->node, true);
+		if (layer_surface->current.exclusive_zone == 0) {
+			l->shadow = wlr_scene_shadow_create(
+				l->scene, 0, 0, config.border_radius, config.shadows_blur,
+				config.shadowscolor);
+			wlr_scene_node_lower_to_bottom(&l->shadow->node);
+			wlr_scene_node_set_enabled(&l->shadow->node, true);
+		}
+
+		l->blur = wlr_scene_blur_create(l->scene, 0, 0);
+		wlr_scene_node_lower_to_bottom(&l->blur->node);
 	}
 
 	// 初始化动画
@@ -2826,6 +3091,9 @@ void maplayersurfacenotify(struct wl_listener *listener, void *data) {
 		l->animation.duration = config.animation_duration_open;
 		l->animation.action = OPEN;
 		layer_set_pending_state(l);
+	} else {
+		l->animainit_geom = l->animation.current = l->current = l->pending =
+			l->geom;
 	}
 	// 刷新布局，让窗口能感应到exclude_zone变化以及设置独占表面
 	arrangelayers(l->mon);
@@ -2838,7 +3106,7 @@ void commitlayersurfacenotify(struct wl_listener *listener, void *data) {
 	struct wlr_scene_tree *scene_layer =
 		layers[layermap[layer_surface->current.layer]];
 	struct wlr_layer_surface_v1_state old_state;
-	struct wlr_box box;
+	struct wlr_box box = l->geom;
 
 	if (l->layer_surface->initial_commit) {
 		client_set_scale(layer_surface->surface, l->mon->wlr_output->scale);
@@ -2869,20 +3137,26 @@ void commitlayersurfacenotify(struct wl_listener *listener, void *data) {
 
 	get_layer_target_geometry(l, &box);
 
-	if (config.animations && config.layer_animations && !l->noanim &&
-		l->mapped &&
-		layer_surface->current.layer != ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM &&
-		layer_surface->current.layer != ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND &&
-		!wlr_box_equal(&box, &l->geom)) {
-
+	if (!wlr_box_equal(&box, &l->geom)) {
 		l->geom.x = box.x;
 		l->geom.y = box.y;
 		l->geom.width = box.width;
 		l->geom.height = box.height;
-		l->animation.action = MOVE;
-		l->animation.duration = config.animation_duration_move;
-		l->need_output_flush = true;
-		layer_set_pending_state(l);
+
+		if (config.animations && config.layer_animations && !l->noanim &&
+			l->mapped &&
+			layer_surface->current.layer != ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM &&
+			layer_surface->current.layer !=
+				ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND) {
+			l->animation.action = MOVE;
+			l->animation.duration = config.animation_duration_move;
+			l->need_output_flush = true;
+			layer_set_pending_state(l);
+		} else {
+			l->animainit_geom = l->animation.current = l->current = l->pending =
+				l->geom;
+			l->need_output_flush = true;
+		}
 	}
 
 	if (config.blur && config.blur_layer) {
@@ -2890,7 +3164,8 @@ void commitlayersurfacenotify(struct wl_listener *listener, void *data) {
 		if (!l->noblur &&
 			layer_surface->current.layer != ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM &&
 			layer_surface->current.layer !=
-				ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND) {
+				ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND &&
+			l->blur) {
 
 			wlr_scene_node_for_each_buffer(&l->scene->node,
 										   iter_layer_scene_buffers, l);
@@ -2929,6 +3204,8 @@ void commitlayersurfacenotify(struct wl_listener *listener, void *data) {
 void commitnotify(struct wl_listener *listener, void *data) {
 	Client *c = wl_container_of(listener, c, commit);
 	struct wlr_box *new_geo;
+
+	/* overview 卡片节点是独立的 scene_surface，提交后自动更新，无需在此处理 */
 
 	if (c->surface.xdg->initial_commit) {
 		// xdg client will first enter this before mapnotify
@@ -3011,12 +3288,13 @@ static bool popup_unconstrain(Popup *popup) {
 
 	struct wlr_scene_node *parent_node = wlr_popup->parent->data;
 	if (!parent_node) {
-		wlr_log(WLR_ERROR, "Popup parent has no scene node");
+		mango_error(true, WLR_ERROR, "Popup parent has no scene node");
 		return false;
 	}
 
 	type = toplevel_from_wlr_surface(wlr_popup->base->surface, &c, &l);
-	if ((l && !l->mon) || (c && !c->mon)) {
+	if ((type == LayerShell && (!l || !l->mon)) ||
+		(type != LayerShell && (!c || !c->mon))) {
 		return true;
 	}
 
@@ -3097,6 +3375,8 @@ static void createpopup(struct wl_listener *listener, void *data) {
 	Popup *popup = calloc(1, sizeof(Popup));
 	if (!popup)
 		return;
+
+	popup->type = XdgPopup;
 
 	popup->destroy.notify = destroypopup;
 	wl_signal_add(&wlr_popup->events.destroy, &popup->destroy);
@@ -3245,7 +3525,6 @@ void createlayersurface(struct wl_listener *listener, void *data) {
 	LISTEN(&l->scene->node.events.destroy, &l->destroy, destroylayernodenotify);
 
 	wl_list_insert(&l->mon->layers[layer_surface->pending.layer], &l->link);
-	wlr_surface_send_enter(surface, layer_surface->output);
 }
 
 void createlocksurface(struct wl_listener *listener, void *data) {
@@ -3289,15 +3568,23 @@ struct wlr_output_mode *get_nearest_output_mode(struct wlr_output *output,
 }
 
 void enable_adaptive_sync(Monitor *m, struct wlr_output_state *state) {
+
 	wlr_output_state_set_adaptive_sync_enabled(state, true);
 	if (!wlr_output_test_state(m->wlr_output, state)) {
 		wlr_output_state_set_adaptive_sync_enabled(state, false);
-		wlr_log(WLR_DEBUG, "failed to enable adaptive sync for output %s",
-				m->wlr_output->name);
+		mango_error(true, WLR_DEBUG,
+					"failed to enable adaptive sync for output %s",
+					m->wlr_output->name);
 	} else {
-		wlr_log(WLR_INFO, "adaptive sync enabled for output %s",
-				m->wlr_output->name);
+		m->is_vrr_enabling = true;
+		mango_error(true, WLR_INFO, "adaptive sync enabled for output %s",
+					m->wlr_output->name);
 	}
+}
+
+void disable_adaptive_sync(Monitor *m, struct wlr_output_state *state) {
+	wlr_output_state_set_adaptive_sync_enabled(state, false);
+	m->is_vrr_enabling = false;
 }
 
 bool monitor_matches_rule(Monitor *m, const ConfigMonitorRule *rule) {
@@ -3318,25 +3605,33 @@ bool monitor_matches_rule(Monitor *m, const ConfigMonitorRule *rule) {
 
 /* 将规则中的显示参数应用到 wlr_output_state 中，返回是否设置了自定义模式 */
 bool apply_rule_to_state(Monitor *m, const ConfigMonitorRule *rule,
-						 struct wlr_output_state *state, int vrr, int custom) {
+						 struct wlr_output_state *state) {
 	bool mode_set = false;
+	m->vrr_global_enable = rule->vrr >= 0 ? rule->vrr : 0;
+	m->hdr_enable = rule->hdr >= 0 ? rule->hdr : 0;
+	m->prefer_disable = rule->disable >= 0 ? rule->disable : 0;
+	m->hdr_min_lum = rule->hdr_min_lum;
+	m->hdr_max_lum = rule->hdr_max_lum;
+	m->hdr_max_avg_lum = rule->hdr_max_avg_lum;
+	m->hdr_force = rule->hdr_force >= 0 ? rule->hdr_force : 0;
+
 	if (rule->width > 0 && rule->height > 0 && rule->refresh > 0) {
 		struct wlr_output_mode *internal_mode = get_nearest_output_mode(
 			m->wlr_output, rule->width, rule->height, rule->refresh);
 		if (internal_mode) {
 			wlr_output_state_set_mode(state, internal_mode);
 			mode_set = true;
-		} else if (custom || wlr_output_is_headless(m->wlr_output)) {
+		} else if (rule->custom || wlr_output_is_headless(m->wlr_output)) {
 			wlr_output_state_set_custom_mode(
 				state, rule->width, rule->height,
 				(int32_t)roundf(rule->refresh * 1000));
 			mode_set = true;
 		}
 	}
-	if (vrr) {
+	if (m->vrr_global_enable) {
 		enable_adaptive_sync(m, state);
 	} else {
-		wlr_output_state_set_adaptive_sync_enabled(state, false);
+		disable_adaptive_sync(m, state);
 	}
 	wlr_output_state_set_scale(state, rule->scale);
 	wlr_output_state_set_transform(state, rule->rr);
@@ -3344,13 +3639,10 @@ bool apply_rule_to_state(Monitor *m, const ConfigMonitorRule *rule,
 }
 
 void createmon(struct wl_listener *listener, void *data) {
-	/* This event is raised by the backend when a new output (aka a display or
-	 * monitor) becomes available. */
 	struct wlr_output *wlr_output = data;
 	const ConfigMonitorRule *r;
 	uint32_t i;
-	int32_t ji, vrr, custom;
-	struct wlr_output_state state;
+	int32_t ji;
 	Monitor *m = NULL;
 	bool custom_monitor_mode = false;
 
@@ -3377,11 +3669,18 @@ void createmon(struct wl_listener *listener, void *data) {
 	m->carousel_anim_dir = 0;
 	m->active_tags_mask = config.initial_tags_count >= 32 ? ~0U : (1U << config.initial_tags_count) - 1;
 	m->tags_had_clients_mask = 0;
+	m->vrr_global_enable = false;
+	m->is_vrr_enabling = false;
+	m->hdr_enable = false;
+	m->prefer_disable = false;
+	m->is_hdr_enabling = false;
+	m->hdr_min_lum = 0.0f;
+	m->hdr_max_lum = 0.0f;
+	m->hdr_max_avg_lum = 0.0f;
+	m->hdr_force = false;
 
 	m->wlr_output = wlr_output;
 	m->wlr_output->data = m;
-
-	wl_list_init(&m->dwl_ipc_outputs);
 
 	for (i = 0; i < LENGTH(m->layers); i++)
 		wl_list_init(&m->layers[i]);
@@ -3393,14 +3692,17 @@ void createmon(struct wl_listener *listener, void *data) {
 	m->isoverview = 0;
 	m->sel = NULL;
 	m->is_in_hotarea = 0;
+	m->ov_normal_mode = 0;
 	m->m.x = INT32_MAX;
 	m->m.y = INT32_MAX;
+
+	// 临时 pending 状态，用于匹配规则时暂存设置
+	struct wlr_output_state pending;
+	wlr_output_state_init(&pending);
 	float scale = 1;
 	enum wl_output_transform rr = WL_OUTPUT_TRANSFORM_NORMAL;
-
-	wlr_output_state_init(&state);
-	wlr_output_state_set_scale(&state, scale);
-	wlr_output_state_set_transform(&state, rr);
+	wlr_output_state_set_scale(&pending, scale);
+	wlr_output_state_set_transform(&pending, rr);
 
 	for (ji = 0; ji < config.monitor_rules_count; ji++) {
 		if (config.monitor_rules_count < 1)
@@ -3411,36 +3713,114 @@ void createmon(struct wl_listener *listener, void *data) {
 		if (monitor_matches_rule(m, r)) {
 			m->m.x = r->x == INT32_MAX ? INT32_MAX : r->x;
 			m->m.y = r->y == INT32_MAX ? INT32_MAX : r->y;
-			vrr = r->vrr >= 0 ? r->vrr : 0;
-			custom = r->custom >= 0 ? r->custom : 0;
-			scale = r->scale;
-			rr = r->rr;
 
-			if (apply_rule_to_state(m, r, &state, vrr, custom)) {
+			if (apply_rule_to_state(m, r, &pending)) {
 				custom_monitor_mode = true;
 			}
 			break; // 只应用第一个匹配规则
 		}
 	}
 
-	if (!custom_monitor_mode)
-		wlr_output_state_set_mode(&state,
-								  wlr_output_preferred_mode(wlr_output));
+	if (!custom_monitor_mode) {
+		struct wlr_output_mode *preferred_mode =
+			wlr_output_preferred_mode(wlr_output);
+		if (preferred_mode) {
+			wlr_output_state_set_mode(&pending, preferred_mode);
+		} else {
+			struct wlr_output_state custom_test_mode;
+			wlr_output_state_init(&custom_test_mode);
+			wlr_output_state_set_custom_mode(&custom_test_mode, 1920, 1080,
+											 60000);
+			if (wlr_output_test_state(wlr_output, &custom_test_mode)) {
+				wlr_output_state_set_custom_mode(&pending, 1920, 1080, 60000);
+			}
+			wlr_output_state_finish(&custom_test_mode);
+		}
+	}
 
-	/* Set up event listeners */
-	LISTEN(&wlr_output->events.frame, &m->frame, rendermon);
-	LISTEN(&wlr_output->events.destroy, &m->destroy, cleanupmon);
-	LISTEN(&wlr_output->events.request_state, &m->request_state,
-		   requestmonstate);
+	// ===================================================
+	// 构建最终的输出状态，包含 HDR，并通过 scene 提交
+	// ===================================================
+	struct wlr_output_state state;
+	wlr_output_state_init(&state);
 
-	wlr_output_state_set_enabled(&state, 1);
+	// 启用/禁用
+	if (m->prefer_disable) {
+		wlr_output_state_set_enabled(&state, false);
+	} else {
+		wlr_output_state_set_enabled(&state, true);
+	}
+
+	// 模式设置
+	if (pending.committed & WLR_OUTPUT_STATE_MODE) {
+		if (pending.mode_type == WLR_OUTPUT_STATE_MODE_FIXED) {
+			wlr_output_state_set_mode(&state, pending.mode);
+		} else if (pending.mode_type == WLR_OUTPUT_STATE_MODE_CUSTOM) {
+			wlr_output_state_set_custom_mode(&state, pending.custom_mode.width,
+											 pending.custom_mode.height,
+											 pending.custom_mode.refresh);
+		}
+	} else {
+		// 兜底,使用首选模式
+		struct wlr_output_mode *pref = wlr_output_preferred_mode(wlr_output);
+		if (pref)
+			wlr_output_state_set_mode(&state, pref);
+	}
+
+	// 缩放、变换
+	if (pending.committed & WLR_OUTPUT_STATE_SCALE)
+		wlr_output_state_set_scale(&state, pending.scale);
+	if (pending.committed & WLR_OUTPUT_STATE_TRANSFORM)
+		wlr_output_state_set_transform(&state, pending.transform);
+
+	// 自适应同步 (VRR)
+	if (pending.committed & WLR_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED)
+		wlr_output_state_set_adaptive_sync_enabled(
+			&state, pending.adaptive_sync_enabled);
+
+	// HDR 设置
+	if (m->hdr_enable) {
+		output_state_setup_hdr(m, false, &state);
+	} else {
+		output_enable_hdr(m, &state, false, false);
+	}
+
+	// 创建 scene_output（如果尚未创建）
+	m->scene_output = wlr_scene_output_create(scene, wlr_output);
+
+	// 通过 scene 构建最终提交状态（初始化 swapchain）
+	struct wlr_scene_output_state_options opts = {
+		.swapchain = NULL, // 让 scene 自动创建
+		.color_transform = NULL,
+	};
+
+	wlr_scene_output_build_state(m->scene_output, &state, &opts);
+
 	wlr_output_commit_state(wlr_output, &state);
-	wlr_output_state_finish(&state);
 
+	wlr_output_state_finish(&state);
+	wlr_output_state_finish(&pending);
+
+	// 加入布局
+	struct wlr_output_layout_output *layout_output;
+	if (m->m.x == INT32_MAX || m->m.y == INT32_MAX)
+		layout_output = wlr_output_layout_add_auto(output_layout, wlr_output);
+	else
+		layout_output =
+			wlr_output_layout_add(output_layout, wlr_output, m->m.x, m->m.y);
+
+	wlr_scene_output_layout_add_output(scene_layout, layout_output,
+									   m->scene_output);
+
+	// 获取有效分辨率
+	wlr_output_effective_resolution(wlr_output, &m->m.width, &m->m.height);
+
+	// 加入全局 monitor 链表
 	wl_list_insert(&mons, &m->link);
 
+	// 初始化 Pertag 等
 	m->pertag = calloc(1, sizeof(Pertag));
-	for (int i = 0; i < LENGTH(tags) + 1; i++)
+	for (int i = 0; i < config.tag_num + 1; i++)
 		m->pertag->scroller_state[i] = NULL;
 
 	if (chvt_backup_tag &&
@@ -3454,35 +3834,14 @@ void createmon(struct wl_listener *listener, void *data) {
 		m->pertag->curtag = m->pertag->prevtag = 1;
 	}
 
-	for (i = 0; i <= LENGTH(tags); i++) {
+	for (i = 0; i <= config.tag_num; i++) {
 		m->pertag->nmasters[i] = config.default_nmaster;
 		m->pertag->mfacts[i] = config.default_mfact;
 		m->pertag->ltidxs[i] = &layouts[0];
 	}
 
-	// apply tag rule
+	// 应用 tag rule
 	parse_tagrule(m);
-
-	/* The xdg-protocol specifies:
-	 *
-	 * If the fullscreened surface is not opaque, the compositor must make
-	 * sure that other screen content not part of the same surface tree (made
-	 * up of subsurfaces, popups or similarly coupled surfaces) are not
-	 * visible below the fullscreened surface.
-	 *
-	 */
-
-	/* Adds this to the output layout in the order it was configured.
-	 *
-	 * The output layout utility automatically adds a wl_output global to the
-	 * display, which Wayland clients can see to find out information about the
-	 * output (such as DPI, scale factor, manufacturer, etc).
-	 */
-	m->scene_output = wlr_scene_output_create(scene, wlr_output);
-	if (m->m.x == INT32_MAX || m->m.y == INT32_MAX)
-		wlr_output_layout_add_auto(output_layout, wlr_output);
-	else
-		wlr_output_layout_add(output_layout, wlr_output, m->m.x, m->m.y);
 
 	if (config.blur) {
 		m->blur = wlr_scene_optimized_blur_create(&scene->tree, 0, 0);
@@ -3490,15 +3849,25 @@ void createmon(struct wl_listener *listener, void *data) {
 		wlr_scene_node_reparent(&m->blur->node, layers[LyrBlur]);
 		wlr_scene_optimized_blur_set_size(m->blur, m->m.width, m->m.height);
 	}
+
+	// ext workspace group
 	m->ext_group = wlr_ext_workspace_group_handle_v1_create(
 		ext_manager, EXT_WORKSPACE_ENABLE_CAPS);
 	wlr_ext_workspace_group_handle_v1_output_enter(m->ext_group, m->wlr_output);
 
-	for (i = 1; i <= 32; i++) {
+	for (i = 1; i <= config.tag_num; i++) {
 		if (m->active_tags_mask & (1U << (i - 1))) {
 			add_workspace_by_tag(i, m);
 		}
 	}
+
+	updatemons(NULL, NULL);
+
+	// 设置监听器
+	LISTEN(&wlr_output->events.frame, &m->frame, rendermon);
+	LISTEN(&wlr_output->events.destroy, &m->destroy, cleanupmon);
+	LISTEN(&wlr_output->events.request_state, &m->request_state,
+		   requestmonstate);
 
 	printstatus(IPC_WATCH_ARRANGGE);
 }
@@ -3620,30 +3989,22 @@ void destroyinputdevice(struct wl_listener *listener, void *data) {
 	InputDevice *input_dev =
 		wl_container_of(listener, input_dev, destroy_listener);
 
-	// 清理设备特定数据
 	if (input_dev->device_data) {
-		// 根据设备类型进行特定清理
 		switch (input_dev->wlr_device->type) {
 		case WLR_INPUT_DEVICE_SWITCH: {
 			Switch *sw = (Switch *)input_dev->device_data;
-			// 移除 toggle 监听器
 			wl_list_remove(&sw->toggle.link);
-			// 释放 Switch 内存
 			free(sw);
 			break;
 		}
-		// 可以添加其他设备类型的清理代码
 		default:
 			break;
 		}
 		input_dev->device_data = NULL;
 	}
 
-	// 从设备列表中移除
 	wl_list_remove(&input_dev->link);
-	// 移除 destroy 监听器
 	wl_list_remove(&input_dev->destroy_listener.link);
-	// 释放内存
 	free(input_dev);
 }
 
@@ -3741,7 +4102,9 @@ void switch_toggle(struct wl_listener *listener, void *data) {
 		if (config.switch_bindings_count < 1)
 			break;
 		s = &config.switch_bindings[ji];
-		if (event->switch_state == s->fold && s->func) {
+		if ((s->iscommonmode || (s->isdefaultmode && keymode.isdefault) ||
+			 (strcmp(keymode.mode, s->mode) == 0)) &&
+			event->switch_state == s->fold && s->func) {
 			s->func(&s->arg);
 			return;
 		}
@@ -3787,6 +4150,14 @@ void createpointerconstraint(struct wl_listener *listener, void *data) {
 	pointer_constraint->constraint = data;
 	LISTEN(&pointer_constraint->constraint->events.destroy,
 		   &pointer_constraint->destroy, destroypointerconstraint);
+
+	// layer surfaces are never selmon->sel, so match pointer focus too
+	// (e.g. lan-mouse locks the pointer on a 1px layer surface)
+	if (seat->pointer_state.focused_surface ==
+		pointer_constraint->constraint->surface) {
+		cursorconstrain(pointer_constraint->constraint);
+		return;
+	}
 
 	if (!selmon || !selmon->sel)
 		return;
@@ -3877,7 +4248,7 @@ void destroylock(SessionLock *lock, int32_t unlock) {
 		wlr_scene_node_set_enabled(&locked_bg->node, false);
 	}
 
-	focusclient(focustop(selmon), 0);
+	focusclient(focustop(selmon), 1);
 	motionnotify(0, NULL, 0, 0, 0, 0);
 
 destroy:
@@ -3994,8 +4365,9 @@ void focusclient(Client *c, int32_t lift) {
 		return;
 
 	/* Raise client in stacking order if requested */
-	if (c && lift)
-		wlr_scene_node_raise_to_top(&c->scene->node); // 将视图提升到顶层
+	if (c && lift) {
+		client_raise_group(c);
+	}
 
 	if (c && client_surface(c) == old_keyboard_focus_surface && selmon &&
 		selmon->sel)
@@ -4009,13 +4381,14 @@ void focusclient(Client *c, int32_t lift) {
 
 	if (c && !c->iskilling && !client_is_unmanaged(c) && c->mon) {
 
-		last_focus_client = selmon->sel;
+		last_focus_client = selmon ? selmon->sel : NULL;
 		selmon = c->mon;
 		selmon->prevsel = selmon->sel;
 		selmon->sel = c;
 		c->isfocusing = true;
 
 		check_keep_idle_inhibit(c);
+		check_vrr_enable(c);
 
 		if (last_focus_client && !last_focus_client->iskilling &&
 			last_focus_client != c) {
@@ -4027,16 +4400,16 @@ void focusclient(Client *c, int32_t lift) {
 
 		// decide whether need to re-arrange
 
-		if (c && selmon->prevsel &&
-			(selmon->prevsel->tags & selmon->tagset[selmon->seltags]) &&
-			(c->tags & selmon->tagset[selmon->seltags]) && !c->isfloating &&
-			is_scroller_layout(selmon)) {
-			arrange(selmon, false, false);
-		}
-
 		// change focus link position
 		wl_list_remove(&c->flink);
 		wl_list_insert(&fstack, &c->flink);
+
+		if (c && selmon->prevsel &&
+			(selmon->prevsel->tags & selmon->tagset[selmon->seltags]) &&
+			(c->tags & selmon->tagset[selmon->seltags]) && !c->isfloating &&
+			(is_scroller_layout(selmon) || is_monocle_layout(selmon))) {
+			arrange(selmon, false, false);
+		}
 
 		// change border color
 		c->isurgent = 0;
@@ -4095,8 +4468,9 @@ void focusclient(Client *c, int32_t lift) {
 			selmon->sel = NULL;
 
 		// clear text input focus state
-		dwl_im_relay_set_focus(dwl_input_method_relay, NULL);
+		mango_im_relay_set_focus(mango_input_method_relay, NULL);
 		wlr_seat_keyboard_notify_clear_focus(seat);
+		check_vrr_enable(c);
 		if (active_constraint) {
 			cursorconstrain(NULL);
 		}
@@ -4109,7 +4483,7 @@ void focusclient(Client *c, int32_t lift) {
 	// set text input focus
 	// must before client_notify_enter,
 	// otherwise the position of text_input will be wrong.
-	dwl_im_relay_set_focus(dwl_input_method_relay, client_surface(c));
+	mango_im_relay_set_focus(mango_input_method_relay, client_surface(c));
 
 	/* Have a client, so focus its top-level wlr_surface */
 	client_notify_enter(client_surface(c), wlr_seat_get_keyboard(seat));
@@ -4137,7 +4511,7 @@ fullscreennotify(struct wl_listener *listener, void *data) {
 	if (!c || c->iskilling)
 		return;
 
-	setfullscreen(c, client_wants_fullscreen(c));
+	setfullscreen(c, client_wants_fullscreen(c), true);
 }
 
 void requestmonstate(struct wl_listener *listener, void *data) {
@@ -4146,6 +4520,7 @@ void requestmonstate(struct wl_listener *listener, void *data) {
 	const struct wlr_output_event_request_state *event = data;
 
 	if (event->state->committed == WLR_OUTPUT_STATE_MODE) {
+
 		switch (event->state->mode_type) {
 		case WLR_OUTPUT_STATE_MODE_FIXED:
 			wlr_output_state_set_mode(&m->pending, event->state->mode);
@@ -4163,8 +4538,8 @@ void requestmonstate(struct wl_listener *listener, void *data) {
 	}
 
 	if (!wlr_output_commit_state(m->wlr_output, event->state)) {
-		wlr_log(WLR_ERROR,
-				"Backend requested a new state that could not be applied");
+		mango_error(false, WLR_ERROR,
+					"Backend requested a new state that could not be applied");
 	}
 }
 
@@ -4190,6 +4565,9 @@ void inputdevice(struct wl_listener *listener, void *data) {
 	case WLR_INPUT_DEVICE_POINTER:
 		createpointer(wlr_pointer_from_input_device(device));
 		break;
+	case WLR_INPUT_DEVICE_TOUCH:
+		createtouch(wlr_touch_from_input_device(device));
+		break;
 	case WLR_INPUT_DEVICE_SWITCH:
 		createswitch(wlr_switch_from_input_device(device));
 		break;
@@ -4203,7 +4581,7 @@ void inputdevice(struct wl_listener *listener, void *data) {
 	 * there are no pointer devices, so we always include that capability.
 	 */
 	/* TODO do we actually require a cursor? */
-	caps = WL_SEAT_CAPABILITY_POINTER;
+	caps = WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_TOUCH;
 	if (!wl_list_empty(&kb_group->wlr_group->devices))
 		caps |= WL_SEAT_CAPABILITY_KEYBOARD;
 	wlr_seat_set_capabilities(seat, caps);
@@ -4248,7 +4626,6 @@ keybinding(uint32_t state, bool locked, uint32_t mods, xkb_keysym_t sym,
 	int32_t handled = 0;
 	const KeyBinding *k;
 	int32_t ji;
-	int32_t isbreak = 0;
 
 	if (is_keyboard_shortcut_inhibitor(seat->keyboard_state.focused_surface)) {
 		return false;
@@ -4291,10 +4668,10 @@ keybinding(uint32_t state, bool locked, uint32_t mods, xkb_keysym_t sym,
 			else
 				handled = 0;
 
-			isbreak = k->func(&k->arg);
+			k->func(&k->arg);
 
-			if (isbreak)
-				break;
+			// only match the first keybind
+			break;
 		}
 	}
 	return handled;
@@ -4393,14 +4770,16 @@ void keypress(struct wl_listener *listener, void *data) {
 	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
 
 	// ov tab mode detect moe key release
-	if (config.ov_tab_mode && !locked && group == kb_group &&
+	if (config.ov_tab_mode && selmon && !selmon->is_jump_mode &&
+		selmon->isoverview && selmon->sel && !locked && group == kb_group &&
 		event->state == WL_KEYBOARD_KEY_STATE_RELEASED &&
-		(keycode == 133 || keycode == 37 || keycode == 64 || keycode == 50 ||
-		 keycode == 134 || keycode == 105 || keycode == 108 || keycode == 62) &&
-		selmon && selmon->sel) {
-		if (selmon->isoverview && selmon->sel) {
-			toggleoverview(&(Arg){.i = 1});
-		}
+		ISMODEKEYCODE(keycode)) {
+		toggleoverview(&(Arg){.i = 1});
+	}
+
+	if (config.cursor_hide_on_keypress && !cursor_hidden &&
+		event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+		hidecursor(NULL);
 	}
 
 	/* On _press_ if there is no active screen locker,
@@ -4413,7 +4792,8 @@ void keypress(struct wl_listener *listener, void *data) {
 		tag_combo = false;
 	}
 
-	if (handled && group->wlr_group->keyboard.repeat_info.delay > 0) {
+	if (handled && group->wlr_group->keyboard.repeat_info.delay > 0 &&
+		event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
 		group->mods = mods;
 		group->keysyms = syms;
 		group->keycode = keycode;
@@ -4428,6 +4808,33 @@ void keypress(struct wl_listener *listener, void *data) {
 
 	if (handled)
 		return;
+
+	if (selmon && selmon->is_jump_mode &&
+		event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+		for (i = 0; i < nsyms; i++) {
+			if (syms[i] == XKB_KEY_Escape) {
+				togglejump(&(Arg){.i = 0});
+				return;
+			}
+			// keysym 转字符，与 jump_labels 匹配（字母忽略大小写）
+			uint32_t cp = xkb_keysym_to_utf32(syms[i]);
+			if (!cp || cp >= 0x80)
+				continue;
+			char c_char = (char)cp;
+			Client *c;
+			wl_list_for_each(c, &clients, link) {
+				if (c->mon == selmon && c->jump_char != '\0' &&
+					!c->is_logic_hide &&
+					(c_char == c->jump_char ||
+					 toupper((unsigned char)c_char) ==
+						 toupper((unsigned char)c->jump_char))) {
+					focusclient(c, 1);
+					toggleoverview(&(Arg){.i = 1});
+					return;
+				}
+			}
+		}
+	}
 
 	/* don't pass when popup is focused
 	 * this is better than having popups (like fuzzel or wmenu) closing
@@ -4446,7 +4853,7 @@ void keypress(struct wl_listener *listener, void *data) {
 	if (hit_global) {
 		return;
 	}
-	if (!dwl_im_keyboard_grab_forward_key(group, event)) {
+	if (!mango_im_keyboard_grab_forward_key(group, event)) {
 		wlr_seat_set_keyboard(seat, &group->wlr_group->keyboard);
 		/* Pass unhandled keycodes along to the client. */
 		wlr_seat_keyboard_notify_key(seat, event->time_msec, event->keycode,
@@ -4459,7 +4866,7 @@ void keypressmod(struct wl_listener *listener, void *data) {
 	 * pressed. We simply communicate this to the client. */
 	KeyboardGroup *group = wl_container_of(listener, group, modifiers);
 
-	if (!dwl_im_keyboard_grab_forward_modifiers(group)) {
+	if (!mango_im_keyboard_grab_forward_modifiers(group)) {
 
 		wlr_seat_set_keyboard(seat, &group->wlr_group->keyboard);
 		/* Send modifiers to the client. */
@@ -4523,21 +4930,31 @@ static void iter_xdg_scene_buffers(struct wlr_scene_buffer *buffer, int32_t sx,
 		return;
 
 	if (config.blur && c && !c->noblur) {
-		wlr_scene_buffer_set_backdrop_blur(buffer, true);
-		wlr_scene_buffer_set_backdrop_blur_ignore_transparent(buffer, false);
 		if (config.blur_optimized) {
-			wlr_scene_buffer_set_backdrop_blur_optimized(buffer, true);
+			wlr_scene_blur_set_should_only_blur_bottom_layer(c->blur, true);
 		} else {
-			wlr_scene_buffer_set_backdrop_blur_optimized(buffer, false);
+			wlr_scene_blur_set_should_only_blur_bottom_layer(c->blur, false);
 		}
-	} else {
-		wlr_scene_buffer_set_backdrop_blur(buffer, false);
 	}
 }
 
 void init_client_properties(Client *c) {
+#ifdef XWAYLAND
+	c->xwl_req_valid = false;
+	c->xwl_req_x = 0;
+	c->xwl_req_y = 0;
+	c->xwl_req_w = 0;
+	c->xwl_req_h = 0;
+#endif
+	c->blur_opacity = 1.0f;
+	c->is_logic_hide = false;
+	c->isgroupfocusing = false;
+	c->group_prev = NULL;
+	c->group_next = NULL;
 	c->grid_col_per = 1.0f;
 	c->grid_row_per = 1.0f;
+	c->jump_label_node = NULL;
+	c->group_bar = NULL;
 	c->overview_scene_surface = NULL;
 	c->drop_direction = UNDIR;
 	c->enable_drop_area_draw = false;
@@ -4555,8 +4972,8 @@ void init_client_properties(Client *c) {
 	c->overview_ismaximizescreenbak = 0;
 	c->overview_isfloatingbak = 0;
 	c->pid = 0;
+	c->swallowdby = NULL;
 	c->swallowing = NULL;
-	c->swallowedby = NULL;
 	c->ismaster = 0;
 	c->old_ismaster = 0;
 	c->isleftstack = 0;
@@ -4564,7 +4981,6 @@ void init_client_properties(Client *c) {
 	c->isfullscreen = 0;
 	c->need_float_size_reduce = 0;
 	c->iskilling = 0;
-	c->istagswitching = 0;
 	c->isglobal = 0;
 	c->isminimized = 0;
 	c->isoverlay = 0;
@@ -4598,6 +5014,8 @@ void init_client_properties(Client *c) {
 	c->ignore_minimize = 1;
 	c->iscustomsize = 0;
 	c->iscustompos = 0;
+	c->iscustom_scroller_proportion = 0;
+	c->iscustom_scroller_proportion_single = 0;
 	c->master_mfact_per = 0.0f;
 	c->master_inner_per = 0.0f;
 	c->stack_inner_per = 0.0f;
@@ -4611,6 +5029,13 @@ void init_client_properties(Client *c) {
 	c->force_tearing = 0;
 	c->allow_shortcuts_inhibit = SHORTCUTS_INHIBIT_ENABLE;
 	c->idleinhibit_when_focus = 0;
+	c->vrr_only_fullscreen = 0;
+	/* unmap 时若在 overview，先销毁卡片树，避免泄漏 */
+	overview_destroy_card(c);
+	c->ov_card_tree = NULL;
+	wl_list_init(&c->ov_card_surfaces);
+	c->force_render = 0;
+	c->activation_bypass = 0;
 	c->scroller_proportion_single = 0.0f;
 	c->float_geom.width = 0;
 	c->float_geom.height = 0;
@@ -4626,6 +5051,14 @@ void init_client_properties(Client *c) {
 	c->opacity_animation.current_opacity = c->unfocused_opacity;
 	c->opacity_animation.initial_dim = c->unfocused_dim;
 	c->opacity_animation.current_dim = c->unfocused_dim;
+	c->animation.tagining = false;
+	c->animation.running = false;
+	c->animation.overining = false;
+	c->animation.overview_enter_anim_set = false;
+	c->animation.tagouting = false;
+	c->animation.tagouted = false;
+	wl_list_init(&c->link);
+	wl_list_init(&c->flink);
 }
 
 void // old fix to 0.5
@@ -4649,6 +5082,25 @@ mapnotify(struct wl_listener *listener, void *data) {
 	c->dim_rect = wlr_scene_rect_create(c->scene, 0, 0, (float[]){0.0f, 0.0f, 0.0f, 0.0f});
 	wlr_scene_node_set_enabled(&c->dim_rect->node, false);
 
+#ifdef XWAYLAND
+	if (client_is_x11(c)) {
+		/* 记录 XWayland 根 buffer 节点 */
+		struct wlr_scene_node *child;
+		wl_list_for_each(child, &c->scene_surface->children, link) {
+			if (child->type != WLR_SCENE_NODE_BUFFER)
+				continue;
+			struct wlr_scene_buffer *buffer = wlr_scene_buffer_from_node(child);
+			if (wlr_scene_surface_try_from_buffer(buffer)) {
+				c->xwl_root_buffer = buffer;
+				break;
+			}
+		}
+		/* scene 处理后强制根 surface 显示逻辑尺寸 */
+		LISTEN(&client_surface(c)->events.commit, &c->scene_commit,
+			   xwayland_scene_commit);
+	}
+#endif
+
 	client_get_geometry(c, &c->geom);
 
 	if (client_is_x11(c))
@@ -4671,26 +5123,46 @@ mapnotify(struct wl_listener *listener, void *data) {
 	c->geom.height += 2 * c->bw;
 	c->overview_backup_geom = c->geom;
 
+	struct wlr_ext_foreign_toplevel_handle_v1_state foreign_toplevel_state = {
+		.app_id = client_get_appid(c),
+		.title = client_get_title(c),
+	};
+
+	c->image_capture_scene = wlr_scene_create();
+	c->ext_foreign_toplevel = wlr_ext_foreign_toplevel_handle_v1_create(
+		foreign_toplevel_list, &foreign_toplevel_state);
+	c->ext_foreign_toplevel->data = c;
+	c->image_capture_scene_surface = wlr_scene_surface_create(
+		&c->image_capture_scene->tree, client_surface(c));
+
 	/* Handle unmanaged clients first so we can return prior create borders
 	 */
+#ifdef XWAYLAND
 	if (client_is_unmanaged(c)) {
 		/* Unmanaged clients always are floating */
-#ifdef XWAYLAND
-		if (client_is_x11(c)) {
-			fix_xwayland_unmanaged_coordinate(c);
-			LISTEN(&c->surface.xwayland->events.set_geometry, &c->set_geometry,
-				   setgeometrynotify);
-		}
-#endif
+		xwayland_apply_scale(c);
+		/* 应用 scale 后重新计算 c->geom（逻辑尺寸）*/
+		client_get_geometry(c, &c->geom);
+		struct wlr_box geo = c->geom;
+		fix_xwayland_coordinate(&geo);
+		struct wlr_box xgeo = geo;
+		xwayland_logical_to_x11(&xgeo, c->xwayland_scale);
+		wlr_scene_node_set_position(&c->scene->node, geo.x, geo.y);
+		wlr_xwayland_surface_configure(c->surface.xwayland, xgeo.x, xgeo.y,
+									   xgeo.width, xgeo.height);
+		/* 立即按 buffer 实际尺寸设置 dest_size（逻辑尺寸 = buffer/scale），
+		 * 避免弹出第一帧以物理尺寸显示导致内容被缩放，再等 commit 才纠正 */
+		client_update_xwayland_dest_size(c);
+		LISTEN(&c->surface.xwayland->events.set_geometry, &c->set_geometry,
+			   setgeometrynotify);
 		wlr_scene_node_reparent(&c->scene->node, layers[LyrOverlay]);
-		wlr_scene_node_set_position(&c->scene->node, c->geom.x, c->geom.y);
 		if (client_wants_focus(c)) {
 			focusclient(c, 1);
 			exclusive_focus = c;
 		}
 		return;
 	}
-
+#endif
 	// extra node
 
 	for (i = 0; i < 2; i++) {
@@ -4702,6 +5174,8 @@ mapnotify(struct wl_listener *listener, void *data) {
 		wlr_scene_node_set_enabled(&c->splitindicator[i]->node, false);
 	}
 
+	client_add_group_bar(c);
+
 	c->droparea = wlr_scene_rect_create(c->scene, 0, 0, config.dropcolor);
 	wlr_scene_node_lower_to_bottom(&c->droparea->node);
 	wlr_scene_node_set_position(&c->droparea->node, 0, 0);
@@ -4711,16 +5185,25 @@ mapnotify(struct wl_listener *listener, void *data) {
 		c->scene, 0, 0, c->isurgent ? config.urgentcolor : config.bordercolor);
 	wlr_scene_node_lower_to_bottom(&c->border->node);
 	wlr_scene_node_set_position(&c->border->node, 0, 0);
-	wlr_scene_rect_set_corner_radius(c->border, config.border_radius,
-									 config.border_radius_location_default);
+	wlr_scene_rect_set_corner_radii(c->border,
+									corner_radii_all(config.border_radius));
 	wlr_scene_node_set_enabled(&c->border->node, true);
 
 	c->shadow =
 		wlr_scene_shadow_create(c->scene, 0, 0, config.border_radius,
 								config.shadows_blur, config.shadowscolor);
 
+	c->blur = wlr_scene_blur_create(c->scene, 0, 0);
+	wlr_scene_node_lower_to_bottom(&c->blur->node);
+
 	wlr_scene_node_lower_to_bottom(&c->shadow->node);
 	wlr_scene_node_set_enabled(&c->shadow->node, true);
+
+	c->shield =
+		wlr_scene_rect_create(c->scene, 0, 0, (float[4]){0, 0, 0, 0xff});
+	c->shield->node.data = c;
+	wlr_scene_node_lower_to_bottom(&c->shield->node);
+	wlr_scene_node_set_enabled(&c->shield->node, false);
 
 	if (config.new_is_master && selmon && !is_scroller_layout(selmon))
 		// tile at the top
@@ -4747,6 +5230,12 @@ mapnotify(struct wl_listener *listener, void *data) {
 
 	applyrules(c);
 
+#ifdef XWAYLAND
+	/* applyrules/setmon 之后 c->mon 才确定，此时应用 XWayland 缩放 */
+	if (client_is_x11(c))
+		xwayland_apply_scale(c);
+#endif
+
 	if (!c->isfloating || c->force_tiled_state) {
 		client_set_tiled(c, WLR_EDGE_TOP | WLR_EDGE_BOTTOM | WLR_EDGE_LEFT |
 								WLR_EDGE_RIGHT);
@@ -4760,7 +5249,7 @@ mapnotify(struct wl_listener *listener, void *data) {
 	// set border color
 	setborder_color(c);
 
-	if (c->mon && c->mon->isoverview && config.ov_no_resize) {
+	if (c->mon && c->mon->isoverview) {
 		overview_backup_surface(c);
 	}
 
@@ -4782,9 +5271,9 @@ void maximizenotify(struct wl_listener *listener, void *data) {
 	}
 
 	if (client_request_maximize(c, data)) {
-		setmaximizescreen(c, 1);
+		setmaximizescreen(c, 1, true);
 	} else {
-		setmaximizescreen(c, 0);
+		setmaximizescreen(c, 0, true);
 	}
 }
 
@@ -4811,7 +5300,7 @@ void unminimize(Client *c) {
 
 void set_minimized(Client *c) {
 
-	if (!c || !c->mon)
+	if (!c || !c->mon || c == grabc)
 		return;
 
 	c->isglobal = 0;
@@ -4942,16 +5431,15 @@ void motionnotify(uint32_t time, struct wlr_input_device *device, double dx,
 
 		/* Update selmon (even while dragging a window) */
 		if (config.sloppyfocus) {
-			Monitor *old_selmon = selmon;
+			Monitor *oldmon = selmon;
 			selmon = xytomon(cursor->x, cursor->y);
-			if (selmon != old_selmon) {
-				printstatus(IPC_WATCH_ARRANGGE);
-			}
+			if (oldmon != selmon)
+				printstatus(IPC_WATCH_MONITOR | IPC_WATCH_ALL_MONITORS | IPC_WATCH_ARRANGGE);
 		}
 	}
 
 	/* Find the client under the pointer and send the event along. */
-	xytonode(cursor->x, cursor->y, &surface, &c, NULL, &sx, &sy);
+	xytonode(cursor->x, cursor->y, &surface, &c, NULL, NULL, &sx, &sy);
 
 	if (cursor_mode == CurPressed && !seat->drag &&
 		surface != seat->pointer_state.focused_surface &&
@@ -5017,7 +5505,8 @@ void motionnotify(uint32_t time, struct wlr_input_device *device, double dx,
 	if (!surface && !seat->drag && !cursor_hidden)
 		wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
 
-	if (c && c->mon && !c->animation.running && (INSIDEMON(c) || !ISTILED(c))) {
+	if (c && c->mon && !c->animation.running &&
+		(INSIDEMON(c) || !ISSCROLLTILED(c))) {
 		scroller_focus_lock = 0;
 	}
 
@@ -5029,13 +5518,15 @@ void motionnotify(uint32_t time, struct wlr_input_device *device, double dx,
 	}
 
 	if (!scroller_focus_lock || !(c && c->mon && !INSIDEMON(c))) {
-		if (c && c->mon && is_scroller_layout(c->mon) && !INSIDEMON(c)) {
+		if (c && c->mon && ISSCROLLTILED(c) && is_scroller_layout(c->mon) &&
+			!INSIDEMON(c)) {
 			should_lock = true;
 		}
 
 		if (!((!config.edge_scroller_pointer_focus ||
 			   speed < config.edge_scroller_focus_allow_speed) &&
-			  c && c->mon && is_scroller_layout(c->mon) && !INSIDEMON(c))) {
+			  c && c->mon && ISSCROLLTILED(c) && is_scroller_layout(c->mon) &&
+			  !INSIDEMON(c))) {
 			pointerfocus(c, surface, sx, sy, time);
 		}
 
@@ -5069,6 +5560,29 @@ void outputmgrapply(struct wl_listener *listener, void *data) {
 	outputmgrapplyortest(config, 0);
 }
 
+static void
+handle_new_foreign_toplevel_capture_request(struct wl_listener *listener,
+											void *data) {
+	struct wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request
+		*request = data;
+	Client *c = request->toplevel_handle->data;
+
+	if (c->shield_when_capture)
+		return;
+
+	if (c->image_capture_source == NULL) {
+		c->image_capture_source =
+			wlr_ext_image_capture_source_v1_create_with_scene_node(
+				&c->image_capture_scene->tree.node, event_loop, alloc, drw);
+		if (c->image_capture_source == NULL) {
+			return;
+		}
+	}
+
+	wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request_accept(
+		request, c->image_capture_source);
+}
+
 void // 0.7 custom
 outputmgrapplyortest(struct wlr_output_configuration_v1 *config, int32_t test) {
 	/*
@@ -5087,7 +5601,7 @@ outputmgrapplyortest(struct wlr_output_configuration_v1 *config, int32_t test) {
 
 		/* Ensure displays previously disabled by
 		 * wlr-output-power-management-v1 are properly handled*/
-		m->asleep = 0;
+		m->only_sleep = 0;
 
 		wlr_output_state_init(&state);
 		wlr_output_state_set_enabled(&state, config_head->state.enabled);
@@ -5104,8 +5618,12 @@ outputmgrapplyortest(struct wlr_output_configuration_v1 *config, int32_t test) {
 
 		wlr_output_state_set_transform(&state, config_head->state.transform);
 		wlr_output_state_set_scale(&state, config_head->state.scale);
-		wlr_output_state_set_adaptive_sync_enabled(
-			&state, config_head->state.adaptive_sync_enabled);
+
+		if (config_head->state.adaptive_sync_enabled) {
+			enable_adaptive_sync(m, &state);
+		} else {
+			disable_adaptive_sync(m, &state);
+		}
 
 	apply_or_test:
 		ok &= test ? wlr_output_test_state(wlr_output, &state)
@@ -5142,11 +5660,22 @@ void pointerfocus(Client *c, struct wlr_surface *surface, double sx, double sy,
 	struct timespec now;
 
 	if (config.sloppyfocus && !start_drag_window && c && time && c->scene &&
-		c->scene->node.enabled && !c->animation.tagining &&
+		c->scene->node.enabled &&
+		(!c->mon || !c->mon->isoverview || !config.ov_tab_mode) &&
+		!c->animation.tagining &&
 		(surface != seat->pointer_state.focused_surface ||
 		 (selmon && selmon->isoverview && selmon->sel != c)) &&
 		!client_is_unmanaged(c) && VISIBLEON(c, c->mon))
 		focusclient(c, 0);
+
+	/* Pointer-driven layer constraints: deactivate as soon as the pointer
+	 * leaves their surface. Toplevel constraints are managed by focusclient
+	 * (keyboard focus driven), so they are left untouched here. */
+	if (active_constraint && surface != seat->pointer_state.focused_surface &&
+		toplevel_from_wlr_surface(active_constraint->surface, NULL, NULL) ==
+			LayerShell) {
+		cursorconstrain(NULL);
+	}
 
 	/* If surface is NULL, clear pointer focus */
 	if (!surface) {
@@ -5163,10 +5692,33 @@ void pointerfocus(Client *c, struct wlr_surface *surface, double sx, double sy,
 	 * of its surfaces, and make keyboard focus follow if desired.
 	 * wlroots makes this a no-op if surface is already focused */
 
+	/* X11 窗口是物理尺寸，surface 局部坐标也乘 xwayland_scale */
+#ifdef XWAYLAND
+	if (c && client_is_x11(c) && config.xwayland_ignore_scale &&
+		c->xwayland_scale > 0.f) {
+		sx *= c->xwayland_scale;
+		sy *= c->xwayland_scale;
+	}
+#endif
+
 	if (!c || !c->mon || !c->mon->isoverview) {
 		// don't let window get pointer focus,
 		// avoid game window force grab pointer in overview mode
+		struct wlr_surface *old_focus = seat->pointer_state.focused_surface;
 		wlr_seat_pointer_notify_enter(seat, surface, sx, sy);
+
+		// toplevel constraints are handled by focusclient, this picks up the
+		// ones focusclient can't see
+		if (!c && surface != old_focus) {
+			struct wlr_pointer_constraint_v1 *constraint;
+			wl_list_for_each(constraint, &pointer_constraints->constraints,
+							 link) {
+				if (constraint->surface == surface) {
+					cursorconstrain(constraint);
+					break;
+				}
+			}
+		}
 	}
 
 	wlr_seat_pointer_notify_motion(seat, time, sx, sy);
@@ -5177,18 +5729,65 @@ void printstatus(enum ipc_watch_type type) {
 	wl_signal_emit(&mango_print_status, &type);
 }
 
+// 会话销毁时的回调
+void handle_session_destroy(struct wl_listener *listener, void *data) {
+	struct capture_session_tracker *tracker =
+		wl_container_of(listener, tracker, session_destroy);
+	active_capture_count--;
+	wl_list_remove(&tracker->session_destroy.link);
+
+	Client *c = NULL;
+	wl_list_for_each(c, &clients, link) {
+		if (c->shield_when_capture && !c->iskilling && VISIBLEON(c, c->mon)) {
+			arrange(c->mon, false, false);
+		}
+	}
+
+	mango_error(true, WLR_DEBUG, "Capture session ended, active count: %d",
+				active_capture_count);
+	free(tracker);
+}
+
+// 新会话创建时的回调
+void handle_iamge_copy_capture_new_session(struct wl_listener *listener,
+										   void *data) {
+	struct wlr_ext_image_copy_capture_session_v1 *session = data;
+
+	struct capture_session_tracker *tracker = calloc(1, sizeof(*tracker));
+	if (!tracker) {
+		mango_error(true, WLR_ERROR,
+					"Failed to allocate capture session tracker");
+		return;
+	}
+	tracker->session = session;
+	tracker->session_destroy.notify = handle_session_destroy;
+	// 监听会话的 destroy 信号，以便在会话结束时减少计数
+	wl_signal_add(&session->events.destroy, &tracker->session_destroy);
+
+	active_capture_count++;
+
+	Client *c = NULL;
+	wl_list_for_each(c, &clients, link) {
+		if (c->shield_when_capture && !c->iskilling && VISIBLEON(c, c->mon)) {
+			arrange(c->mon, false, false);
+		}
+	}
+
+	mango_error(true, WLR_DEBUG,
+				"New capture session started, active count: %d",
+				active_capture_count);
+}
+
 void powermgrsetmode(struct wl_listener *listener, void *data) {
 	struct wlr_output_power_v1_set_mode_event *event = data;
-	struct wlr_output_state state = {0};
 	Monitor *m = event->output->data;
 
 	if (!m)
 		return;
 
-	wlr_output_state_set_enabled(&state, event->mode);
-	wlr_output_commit_state(m->wlr_output, &state);
-
-	m->asleep = !event->mode;
+	wlr_output_state_set_enabled(&m->pending, event->mode);
+	mango_output_commit(m);
+	m->only_sleep = !event->mode;
 	updatemons(NULL, NULL);
 }
 
@@ -5244,9 +5843,9 @@ void rendermon(struct wl_listener *listener, void *data) {
 	LayerSurface *l = NULL, *tmpl = NULL;
 	int32_t i;
 	struct wl_list *layer_list;
-	bool frame_allow_tearing = false;
 	struct timespec now;
 	bool need_more_frames = false;
+	bool resizing_on_this_mon = false;
 
 	if (session && !session->active) {
 		return;
@@ -5254,8 +5853,6 @@ void rendermon(struct wl_listener *listener, void *data) {
 
 	if (!m->wlr_output->enabled || !allow_frame_scheduling)
 		return;
-
-	frame_allow_tearing = check_tearing_frame_allow(m);
 
 	// 绘制层和淡出效果
 	for (i = 0; i < LENGTH(m->layers); i++) {
@@ -5266,6 +5863,9 @@ void rendermon(struct wl_listener *listener, void *data) {
 	}
 
 	wl_list_for_each_safe(c, tmp, &fadeout_clients, fadeout_link) {
+		if (c->is_logic_hide)
+			continue;
+
 		need_more_frames = client_draw_fadeout_frame(c) || need_more_frames;
 	}
 
@@ -5273,26 +5873,28 @@ void rendermon(struct wl_listener *listener, void *data) {
 		need_more_frames = layer_draw_fadeout_frame(l) || need_more_frames;
 	}
 
-	// 绘制客户端
 	wl_list_for_each(c, &clients, link) {
+		if (c->is_logic_hide)
+			continue;
+
 		need_more_frames = client_draw_frame(c) || need_more_frames;
-		if (!config.animations && !grabc && c->configure_serial &&
-			client_is_rendered_on_mon(c, m)) {
-			monitor_check_skip_frame_timeout(m);
-			goto skip;
-		}
+
+		if (!c->force_render && c->configure_serial &&
+			client_is_rendered_on_mon(c, m))
+			resizing_on_this_mon = true;
+	}
+
+	if (!config.animations && !grabc && !need_more_frames &&
+		resizing_on_this_mon) {
+		monitor_check_skip_frame_timeout(m);
+		goto skip;
 	}
 
 	if (m->skiping_frame) {
 		monitor_stop_skip_frame_timer(m);
 	}
 
-	// 只有在需要帧时才构建和提交状态
-	if (config.allow_tearing && frame_allow_tearing) {
-		apply_tear_state(m);
-	} else {
-		wlr_scene_output_commit(m->scene_output, NULL);
-	}
+	mango_scene_output_commit(m->scene_output, &m->pending);
 
 skip:
 	// 发送帧完成通知
@@ -5328,7 +5930,7 @@ static void requestdrmlease(struct wl_listener *listener, void *data) {
 	struct wlr_drm_lease_v1 *lease = wlr_drm_lease_request_v1_grant(req);
 
 	if (!lease) {
-		wlr_log(WLR_ERROR, "Failed to grant lease request");
+		mango_error(true, WLR_ERROR, "Failed to grant lease request");
 		wlr_drm_lease_request_v1_reject(req);
 	}
 }
@@ -5388,12 +5990,13 @@ void exchange_two_client(Client *c1, Client *c2) {
 
 void set_activation_env() {
 	if (!getenv("DBUS_SESSION_BUS_ADDRESS")) {
-		wlr_log(WLR_INFO, "Not updating dbus execution environment: "
-						  "DBUS_SESSION_BUS_ADDRESS not set");
+		mango_error(true, WLR_INFO,
+					"Not updating dbus execution environment: "
+					"DBUS_SESSION_BUS_ADDRESS not set");
 		return;
 	}
 
-	wlr_log(WLR_INFO, "Updating dbus execution environment");
+	mango_error(true, WLR_INFO, "Updating dbus execution environment");
 
 	char *env_keys = join_strings(env_vars, " ");
 
@@ -5401,7 +6004,7 @@ void set_activation_env() {
 	const char *arg1 = env_keys;
 	char *cmd1 = string_printf("dbus-update-activation-environment %s", arg1);
 	if (!cmd1) {
-		wlr_log(WLR_ERROR, "Failed to allocate command string");
+		mango_error(true, WLR_ERROR, "Failed to allocate command string");
 		goto cleanup;
 	}
 	spawn(&(Arg){.v = cmd1});
@@ -5411,7 +6014,7 @@ void set_activation_env() {
 	const char *action = "import-environment";
 	char *cmd2 = string_printf("systemctl --user %s %s", action, env_keys);
 	if (!cmd2) {
-		wlr_log(WLR_ERROR, "Failed to allocate command string");
+		mango_error(true, WLR_ERROR, "Failed to allocate command string");
 		goto cleanup;
 	}
 	spawn(&(Arg){.v = cmd2});
@@ -5424,13 +6027,13 @@ cleanup:
 void // 17
 run(char *startup_cmd) {
 
-	set_env();
-
 	/* Add a Unix socket to the Wayland display. */
 	const char *socket = wl_display_add_socket_auto(dpy);
 	if (!socket)
 		die("startup: display_add_socket_auto");
 	setenv("WAYLAND_DISPLAY", socket, 1);
+
+	set_env_display();
 
 	/* Start the backend. This will enumerate outputs and inputs, become the
 	 * DRM master, etc */
@@ -5523,9 +6126,23 @@ void setcursor(struct wl_listener *listener, void *data) {
 			wl_signal_add(&event->surface->events.destroy,
 						  &last_cursor_surface_destroy_listener);
 
-		if (!cursor_hidden)
+		if (!cursor_hidden) {
+#ifdef XWAYLAND
+			/* XWayland 光标按输出 scale 渲染，HiDPI 下 1:1 */
+			if (config.xwayland_ignore_scale && event->surface && xwayland &&
+				xwayland->server &&
+				xwayland->server->client ==
+					wl_resource_get_client(event->surface->resource)) {
+				struct wlr_output *output = wlr_output_layout_output_at(
+					output_layout, cursor->x, cursor->y);
+				float scale =
+					output && output->scale > 0.f ? output->scale : 1.f;
+				wlr_surface_set_preferred_buffer_scale(event->surface, scale);
+			}
+#endif
 			wlr_cursor_set_surface(cursor, event->surface, event->hotspot_x,
 								   event->hotspot_y);
+		}
 	}
 }
 
@@ -5598,13 +6215,14 @@ setfloating(Client *c, int32_t floating) {
 		}
 	}
 
-	if (c->isoverlay || (c->isglobal && c->isfloating)) {
+	if (c->isglobal && c->isfloating) {
 		wlr_scene_node_reparent(&c->scene->node, layers[LyrOverlay]);
-	} else if (client_should_overtop(c) && c->isfloating) {
-		wlr_scene_node_reparent(&c->scene->node, layers[LyrTop]);
 	} else {
-		wlr_scene_node_reparent(&c->scene->node,
-								layers[c->isfloating ? LyrTop : LyrTile]);
+		client_reparent_group(c);
+	}
+
+	if (c->isfloating) {
+		set_size_per(c->mon, c);
 	}
 
 	if (!c->force_fakemaximize)
@@ -5629,11 +6247,18 @@ setfloating(Client *c, int32_t floating) {
 }
 
 void reset_maximizescreen_size(Client *c) {
-	c->geom.x = c->mon->w.x + config.gappoh;
-	c->geom.y = c->mon->w.y + config.gappov;
-	c->geom.width = c->mon->w.width - 2 * config.gappoh;
-	c->geom.height = c->mon->w.height - 2 * config.gappov;
-	resize(c, c->geom, 0);
+	struct wlr_box geom;
+	geom.x = c->mon->w.x + config.gappoh;
+	geom.y = c->mon->w.y + config.gappov;
+	geom.width = c->mon->w.width - 2 * config.gappoh;
+	geom.height = c->mon->w.height - 2 * config.gappov;
+
+	if (c->group_next || c->group_prev) {
+		geom.height -= config.group_bar_height;
+		geom.y += config.group_bar_height;
+	}
+
+	resize(c, geom, 0);
 }
 
 void exit_scroller_stack(Client *c) {
@@ -5646,14 +6271,15 @@ void exit_scroller_stack(Client *c) {
 		struct ScrollerStackNode *n = find_scroller_node(st, c);
 		if (n) {
 			scroller_node_remove(st, n);
-			return; /* 节点已移除，客户端指针已在函数内清空 */
+			return;
 		}
 	}
 }
 
-void setmaximizescreen(Client *c, int32_t maximizescreen) {
+void setmaximizescreen(Client *c, int32_t maximizescreen, bool rearrange) {
 	struct wlr_box maximizescreen_box;
-	if (!c || !c->mon || !client_surface(c)->mapped || c->iskilling)
+	if (!c || !c->mon || !client_surface(c)->mapped || c->iskilling ||
+		c == grabc)
 		return;
 
 	if (c->mon->isoverview)
@@ -5674,6 +6300,12 @@ void setmaximizescreen(Client *c, int32_t maximizescreen) {
 		maximizescreen_box.y = c->mon->w.y + config.gappov;
 		maximizescreen_box.width = c->mon->w.width - 2 * config.gappoh;
 		maximizescreen_box.height = c->mon->w.height - 2 * config.gappov;
+
+		if (c->group_next || c->group_prev) {
+			maximizescreen_box.height -= config.group_bar_height;
+			maximizescreen_box.y += config.group_bar_height;
+		}
+
 		wlr_scene_node_raise_to_top(&c->scene->node);
 		if (!is_scroller_layout(c->mon) || c->isfloating)
 			resize(c, maximizescreen_box, 0);
@@ -5683,11 +6315,10 @@ void setmaximizescreen(Client *c, int32_t maximizescreen) {
 			setfloating(c, 1);
 	}
 
-	if (c->isoverlay || (c->isglobal && c->isfloating)) {
+	if (c->isglobal && c->isfloating) {
 		wlr_scene_node_reparent(&c->scene->node, layers[LyrOverlay]);
 	} else {
-		wlr_scene_node_reparent(&c->scene->node,
-								layers[c->isfloating ? LyrTop : LyrTile]);
+		client_reparent_group(c);
 	}
 
 	if (!c->force_fakemaximize && !c->ismaximizescreen) {
@@ -5696,7 +6327,8 @@ void setmaximizescreen(Client *c, int32_t maximizescreen) {
 		client_set_maximized(c, true);
 	}
 
-	arrange(c->mon, false, false);
+	if (rearrange)
+		arrange(c->mon, false, false);
 }
 
 void setfakefullscreen(Client *c, int32_t fakefullscreen) {
@@ -5705,15 +6337,17 @@ void setfakefullscreen(Client *c, int32_t fakefullscreen) {
 		return;
 
 	if (c->isfullscreen)
-		setfullscreen(c, 0);
+		setfullscreen(c, 0, true);
 
 	client_set_fullscreen(c, fakefullscreen);
 }
 
-void setfullscreen(Client *c, int32_t fullscreen) // 用自定义全屏代理自带全屏
+void setfullscreen(Client *c, int32_t fullscreen,
+				   bool rearrange) // 用自定义全屏代理自带全屏
 {
 
-	if (!c || !c->mon || !client_surface(c)->mapped || c->iskilling)
+	if (!c || !c->mon || !client_surface(c)->mapped || c->iskilling ||
+		c == grabc)
 		return;
 
 	if (c->mon->isoverview)
@@ -5746,36 +6380,34 @@ void setfullscreen(Client *c, int32_t fullscreen) // 用自定义全屏代理自
 			setfloating(c, 1);
 	}
 
-	if (c->isoverlay || (c->isglobal && c->isfloating)) {
+	if (c->isglobal && c->isfloating) {
 		wlr_scene_node_reparent(&c->scene->node, layers[LyrOverlay]);
-	} else if (client_should_overtop(c) && c->isfloating) {
-		wlr_scene_node_reparent(&c->scene->node, layers[LyrTop]);
 	} else {
-		wlr_scene_node_reparent(
-			&c->scene->node,
-			layers[fullscreen || c->isfloating ? LyrTop : LyrTile]);
+		client_reparent_group(c);
 	}
+	check_vrr_enable(c);
 
-	arrange(c->mon, false, false);
+	if (rearrange)
+		arrange(c->mon, false, false);
 }
 
 void setgaps(int32_t oh, int32_t ov, int32_t ih, int32_t iv) {
-	selmon->gappoh = MAX(oh, 0);
-	selmon->gappov = MAX(ov, 0);
-	selmon->gappih = MAX(ih, 0);
-	selmon->gappiv = MAX(iv, 0);
+	selmon->gappoh = MANGO_MAX(oh, 0);
+	selmon->gappov = MANGO_MAX(ov, 0);
+	selmon->gappih = MANGO_MAX(ih, 0);
+	selmon->gappiv = MANGO_MAX(iv, 0);
 	arrange(selmon, false, false);
 }
 
 void reset_keyboard_layout(void) {
 	if (!kb_group || !kb_group->wlr_group || !seat) {
-		wlr_log(WLR_ERROR, "Invalid keyboard group or seat");
+		mango_error(true, WLR_ERROR, "Invalid keyboard group or seat");
 		return;
 	}
 
 	struct wlr_keyboard *keyboard = &kb_group->wlr_group->keyboard;
 	if (!keyboard || !keyboard->keymap) {
-		wlr_log(WLR_ERROR, "Invalid keyboard or keymap");
+		mango_error(true, WLR_ERROR, "Invalid keyboard or keymap");
 		return;
 	}
 
@@ -5784,14 +6416,14 @@ void reset_keyboard_layout(void) {
 		keyboard->xkb_state, XKB_STATE_LAYOUT_EFFECTIVE);
 	const int32_t num_layouts = xkb_keymap_num_layouts(keyboard->keymap);
 	if (num_layouts < 1) {
-		wlr_log(WLR_INFO, "No layouts available");
+		mango_error(true, WLR_INFO, "No layouts available");
 		return;
 	}
 
 	// Create context
 	struct xkb_context *context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
 	if (!context) {
-		wlr_log(WLR_ERROR, "Failed to create XKB context");
+		mango_error(true, WLR_ERROR, "Failed to create XKB context");
 		return;
 	}
 
@@ -5799,25 +6431,25 @@ void reset_keyboard_layout(void) {
 		context, &config.xkb_rules, XKB_KEYMAP_COMPILE_NO_FLAGS);
 	if (!new_keymap) {
 		// 理论上这里不应该失败，因为前面已经验证过了
-		wlr_log(WLR_ERROR,
-				"Unexpected failure to create keymap after validation");
+		mango_error(true, WLR_ERROR,
+					"Unexpected failure to create keymap after validation");
 		goto cleanup_context;
 	}
 
 	// 验证新keymap是否有布局
 	const int32_t new_num_layouts = xkb_keymap_num_layouts(new_keymap);
 	if (new_num_layouts < 1) {
-		wlr_log(WLR_ERROR, "New keymap has no layouts");
+		mango_error(true, WLR_ERROR, "New keymap has no layouts");
 		xkb_keymap_unref(new_keymap);
 		goto cleanup_context;
 	}
 
 	// 确保当前布局索引在新keymap中有效
 	if (current >= new_num_layouts) {
-		wlr_log(WLR_INFO,
-				"Current layout index %u out of range for new keymap, "
-				"resetting to 0",
-				current);
+		mango_error(true, WLR_INFO,
+					"Current layout index %u out of range for new keymap, "
+					"resetting to 0",
+					current);
 		current = 0;
 	}
 
@@ -5888,7 +6520,8 @@ void setmon(Client *c, Monitor *m, uint32_t newtags, bool focus) {
 		}
 		check_match_tag_floating_rule(c, m);
 		setfloating(c, c->isfloating);
-		setfullscreen(c, c->isfullscreen); /* This will call arrange(c->mon) */
+		setfullscreen(c, c->isfullscreen,
+					  true); /* This will call arrange(c->mon) */
 	}
 
 	if (focus && !client_is_x11_popup(c)) {
@@ -5919,14 +6552,16 @@ void setsel(struct wl_listener *listener, void *data) {
 void show_hide_client(Client *c) {
 	uint32_t target = 1;
 
-	set_size_per(c->mon, c);
+	if (c->mon)
+		set_size_per(c->mon, c);
 	target = get_tags_first_tag(c->oldtags);
 
 	if (!c->is_in_scratchpad) {
 		tag_client(&(Arg){.ui = target}, c);
 	} else {
 		c->tags = c->oldtags;
-		arrange(c->mon, false, false);
+		if (c->mon)
+			arrange(c->mon, false, false);
 	}
 	client_pending_minimized_state(c, 0);
 	focusclient(c, 1);
@@ -6008,8 +6643,7 @@ void handle_print_status(struct wl_listener *listener, void *data) {
 			ipc_notify_last_surface_ws_name(m);
 		}
 
-		dwl_ext_workspace_printstatus(m);
-		dwl_ipc_output_printstatus(m);
+		mango_ext_workspace_printstatus(m);
 	}
 }
 
@@ -6023,6 +6657,8 @@ void setup(void) {
 		config.log_level = WLR_DEBUG;
 	}
 	init_baked_points();
+
+	set_env_without_display();
 
 	int32_t drm_fd, i;
 	int32_t sig[] = {SIGCHLD, SIGINT,
@@ -6043,6 +6679,9 @@ void setup(void) {
 	/* The Wayland display is managed by libwayland. It handles accepting
 	 * clients from the Unix socket, manging Wayland globals, and so on. */
 	dpy = wl_display_create();
+
+	wl_display_set_default_max_buffer_size(dpy, 1024 * 1024);
+
 	event_loop = wl_display_get_event_loop(dpy);
 
 	ipc_init(event_loop);
@@ -6061,7 +6700,8 @@ void setup(void) {
 
 	headless_backend = wlr_headless_backend_create(event_loop);
 	if (!headless_backend) {
-		wlr_log(WLR_ERROR, "Failed to create secondary headless backend");
+		mango_error(true, WLR_ERROR,
+					"Failed to create secondary headless backend");
 	} else {
 		wlr_multi_backend_add(backend, headless_backend);
 	}
@@ -6077,6 +6717,48 @@ void setup(void) {
 	/* Create a renderer with the default implementation */
 	if (!(drw = fx_renderer_create(backend)))
 		die("couldn't create renderer");
+
+	if (drw->features.input_color_transform) {
+		const enum wp_color_manager_v1_render_intent render_intents[] = {
+			WP_COLOR_MANAGER_V1_RENDER_INTENT_PERCEPTUAL,
+		};
+		size_t transfer_functions_len = 0;
+		enum wp_color_manager_v1_transfer_function *transfer_functions =
+			wlr_color_manager_v1_transfer_function_list_from_renderer(
+				drw, &transfer_functions_len);
+
+		size_t primaries_len = 0;
+		enum wp_color_manager_v1_primaries *primaries =
+			wlr_color_manager_v1_primaries_list_from_renderer(drw,
+															  &primaries_len);
+
+		struct wlr_color_manager_v1 *cm = wlr_color_manager_v1_create(
+			dpy, 2,
+			&(struct wlr_color_manager_v1_options){
+				.features =
+					{
+						.parametric = true,
+						.set_mastering_display_primaries = true,
+					},
+				.render_intents = render_intents,
+				.render_intents_len = ARRAY_SIZE(render_intents),
+				.transfer_functions = transfer_functions,
+				.transfer_functions_len = transfer_functions_len,
+				.primaries = primaries,
+				.primaries_len = primaries_len,
+			});
+
+		free(transfer_functions);
+		free(primaries);
+
+		if (cm) {
+			wlr_scene_set_color_manager_v1(scene, cm);
+		} else {
+			mango_error(true, WLR_ERROR, "unable to create color manager");
+		}
+	}
+
+	wlr_color_representation_manager_v1_create_with_renderer(dpy, 1, drw);
 
 	wl_signal_add(&drw->events.lost, &gpu_reset);
 
@@ -6110,7 +6792,6 @@ void setup(void) {
 	compositor = wlr_compositor_create(dpy, 6, drw);
 	wlr_export_dmabuf_manager_v1_create(dpy);
 	wlr_screencopy_manager_v1_create(dpy);
-	wlr_ext_image_copy_capture_manager_v1_create(dpy, 1);
 	wlr_ext_output_image_capture_source_manager_v1_create(dpy, 1);
 	wlr_data_control_manager_v1_create(dpy);
 	wlr_data_device_manager_create(dpy);
@@ -6122,20 +6803,33 @@ void setup(void) {
 	wlr_subcompositor_create(dpy);
 	wlr_alpha_modifier_v1_create(dpy);
 	wlr_ext_data_control_manager_v1_create(dpy, 1);
+	wlr_fixes_create(dpy, 1);
 
 	// 在 setup 函数中
 	wl_signal_init(&mango_print_status);
 	wl_signal_add(&mango_print_status, &print_status_listener);
 
-	/* Initializes the interface used to implement urgency hints */
-	activation = wlr_xdg_activation_v1_create(dpy);
-	wl_signal_add(&activation->events.request_activate, &request_activate);
+	ext_image_copy_capture_mgr =
+		wlr_ext_image_copy_capture_manager_v1_create(dpy, 1);
+	wl_signal_add(&ext_image_copy_capture_mgr->events.new_session,
+				  &ext_image_copy_capture_mgr_new_session);
+
+	xdg_activation_init();
 
 	wlr_scene_set_gamma_control_manager_v1(
 		scene, wlr_gamma_control_manager_v1_create(dpy));
 
 	power_mgr = wlr_output_power_manager_v1_create(dpy);
 	wl_signal_add(&power_mgr->events.set_mode, &output_power_mgr_set_mode);
+
+	foreign_toplevel_list = wlr_ext_foreign_toplevel_list_v1_create(dpy, 1);
+	ext_foreign_toplevel_image_capture_source_manager_v1 =
+		wlr_ext_foreign_toplevel_image_capture_source_manager_v1_create(dpy, 1);
+	new_foreign_toplevel_capture_request.notify =
+		handle_new_foreign_toplevel_capture_request;
+	wl_signal_add(&ext_foreign_toplevel_image_capture_source_manager_v1->events
+					   .new_request,
+				  &new_foreign_toplevel_capture_request);
 
 	tearing_control = wlr_tearing_control_manager_v1_create(dpy, 1);
 	tearing_new_object.notify = handle_tearing_new_object;
@@ -6145,12 +6839,14 @@ void setup(void) {
 	 * arrangement of screens in a physical layout. */
 	output_layout = wlr_output_layout_create(dpy);
 	wl_signal_add(&output_layout->events.change, &layout_change);
-	wlr_xdg_output_manager_v1_create(dpy, output_layout);
+	/* 自定义 xdg-output：对 XWayland 单独处理 */
+	xdg_output_init();
 
 	/* Configure a listener to be notified when new outputs are available on
 	 * the backend. */
 	wl_list_init(&mons);
 	wl_signal_add(&backend->events.new_output, &new_output);
+	scene_layout = wlr_scene_attach_output_layout(scene, output_layout);
 
 	/* Set up our client lists and the xdg-shell. The xdg-shell is a
 	 * Wayland protocol which is used for application windows. For more
@@ -6275,6 +6971,14 @@ void setup(void) {
 	LISTEN_STATIC(&cursor->events.hold_begin, hold_begin);
 	LISTEN_STATIC(&cursor->events.hold_end, hold_end);
 
+	/* 触摸支持：初始化触点链表并连接 cursor 触摸事件 */
+	wl_list_init(&touch_points);
+	wl_signal_add(&cursor->events.touch_down, &cursor_touch_down);
+	wl_signal_add(&cursor->events.touch_up, &cursor_touch_up);
+	wl_signal_add(&cursor->events.touch_cancel, &cursor_touch_cancel);
+	wl_signal_add(&cursor->events.touch_motion, &cursor_touch_motion);
+	wl_signal_add(&cursor->events.touch_frame, &cursor_touch_frame);
+
 	seat = wlr_seat_create(dpy, "seat0");
 
 	wl_list_init(&last_cursor_surface_destroy_listener.link);
@@ -6305,18 +7009,16 @@ void setup(void) {
 	input_method_manager = wlr_input_method_manager_v2_create(dpy);
 	text_input_manager = wlr_text_input_manager_v3_create(dpy);
 
-	dwl_input_method_relay = dwl_im_relay_create();
+	mango_input_method_relay = mango_im_relay_create();
 
 	drm_lease_manager = wlr_drm_lease_v1_manager_create(dpy, backend);
 	if (drm_lease_manager) {
 		wl_signal_add(&drm_lease_manager->events.request, &drm_lease_request);
 	} else {
-		wlr_log(WLR_DEBUG, "Failed to create wlr_drm_lease_device_v1.");
-		wlr_log(WLR_INFO, "VR will not be available.");
+		mango_error(true, WLR_DEBUG,
+					"Failed to create wlr_drm_lease_device_v1.");
+		mango_error(true, WLR_INFO, "VR will not be available.");
 	}
-
-	wl_global_create(dpy, &zdwl_ipc_manager_v2_interface, 2, NULL,
-					 dwl_ipc_manager_bind);
 
 	// 创建顶层管理句柄
 	foreign_toplevel_manager = wlr_foreign_toplevel_manager_v1_create(dpy);
@@ -6340,8 +7042,9 @@ void setup(void) {
 
 		setenv("DISPLAY", xwayland->display_name, 1);
 	} else {
-		fprintf(stderr,
-				"failed to setup XWayland X server, continuing without it\n");
+		mango_error(
+			true, WLR_ERROR,
+			"failed to setup XWayland X server, continuing without it\n");
 	}
 	sync_keymap = wl_event_loop_add_timer(wl_display_get_event_loop(dpy),
 										  synckeymap, NULL);
@@ -6362,7 +7065,6 @@ void tag_client(const Arg *arg, Client *target_client) {
 	if (target_client && arg->ui & TAGMASK) {
 
 		target_client->tags = arg->ui & TAGMASK;
-		target_client->istagswitching = 1;
 
 		wl_list_for_each(fc, &clients, link) {
 			if (fc && fc != target_client && target_client->tags & fc->tags &&
@@ -6378,131 +7080,6 @@ void tag_client(const Arg *arg, Client *target_client) {
 
 	focusclient(target_client, 1);
 	printstatus(IPC_WATCH_ARRANGGE);
-}
-
-// 目标窗口有其他窗口和它同个tag就返回0
-uint32_t want_restore_fullscreen(Client *target_client) {
-	Client *c = NULL;
-	wl_list_for_each(c, &clients, link) {
-		if (c && c != target_client && c->tags == target_client->tags &&
-			c == selmon->sel &&
-			c->mon->pertag->ltidxs[get_tags_first_tag_num(c->tags)]->id !=
-				SCROLLER &&
-			c->mon->pertag->ltidxs[get_tags_first_tag_num(c->tags)]->id !=
-				VERTICAL_SCROLLER) {
-			return 0;
-		}
-	}
-
-	return 1;
-}
-
-void overview_backup_surface(Client *c) {
-
-	if (c->overview_scene_surface) {
-		return;
-	}
-
-	struct wlr_box geometry;
-	client_get_geometry(c, &geometry);
-	struct wlr_box clip_box = (struct wlr_box){
-		.x = geometry.x,
-		.y = geometry.y,
-		.width = c->overview_backup_geom.width - 2 * config.borderpx,
-		.height = c->overview_backup_geom.height - 2 * config.borderpx,
-	};
-
-	if (client_is_x11(c)) {
-		clip_box.x = 0;
-		clip_box.y = 0;
-	}
-
-	c->overview_scene_surface = c->scene_surface;
-	wlr_scene_node_set_enabled(&c->scene_surface->node, true);
-	wlr_scene_node_set_position(&c->scene_surface->node, 0, 0);
-	wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip_box);
-	c->scene_surface =
-		wlr_scene_tree_snapshot(&c->scene_surface->node, c->scene);
-	wlr_scene_node_set_enabled(&c->overview_scene_surface->node, false);
-	wlr_scene_node_set_enabled(&c->scene_surface->node, true);
-}
-
-// 普通视图切换到overview时保存窗口的旧状态
-void overview_backup(Client *c) {
-	c->overview_isfloatingbak = c->isfloating;
-	c->overview_isfullscreenbak = c->isfullscreen;
-	c->overview_ismaximizescreenbak = c->ismaximizescreen;
-	c->overview_isfullscreenbak = c->isfullscreen;
-	c->animation.tagining = false;
-	c->animation.tagouted = false;
-	c->animation.tagouting = false;
-	c->overview_backup_geom = c->geom;
-	c->overview_backup_bw = c->bw;
-	if (c->isfloating) {
-		c->isfloating = 0;
-	}
-
-	if (config.ov_no_resize) {
-		overview_backup_surface(c);
-	}
-
-	if (c->isfullscreen || c->ismaximizescreen) {
-		client_pending_fullscreen_state(c, 0); // 清除窗口全屏标志
-		client_pending_maximized_state(c, 0);
-	}
-	c->bw = c->isnoborder ? 0 : config.borderpx;
-
-	client_set_tiled(c, WLR_EDGE_TOP | WLR_EDGE_BOTTOM | WLR_EDGE_LEFT |
-							WLR_EDGE_RIGHT);
-}
-
-// overview切回到普通视图还原窗口的状态
-void overview_restore(Client *c, const Arg *arg) {
-	c->isfloating = c->overview_isfloatingbak;
-	c->isfullscreen = c->overview_isfullscreenbak;
-	c->ismaximizescreen = c->overview_ismaximizescreenbak;
-	c->overview_isfloatingbak = 0;
-	c->overview_isfullscreenbak = 0;
-	c->overview_ismaximizescreenbak = 0;
-	c->geom = c->overview_backup_geom;
-	c->bw = c->overview_backup_bw;
-	c->animation.tagining = false;
-	c->is_restoring_from_ov = (arg->ui & c->tags & TAGMASK) == 0 ? true : false;
-
-	if (c->overview_scene_surface) {
-		wlr_scene_node_destroy(&c->scene_surface->node);
-		c->scene_surface = c->overview_scene_surface;
-		c->overview_scene_surface = NULL;
-	}
-
-	if (c->isfloating) {
-		// XRaiseWindow(dpy, c->win); // 提升悬浮窗口到顶层
-		resize(c, c->overview_backup_geom, 0);
-	} else if (c->isfullscreen || c->ismaximizescreen) {
-		if (want_restore_fullscreen(c) && c->ismaximizescreen) {
-			setmaximizescreen(c, 1);
-		} else if (want_restore_fullscreen(c) && c->isfullscreen) {
-			setfullscreen(c, 1);
-		} else {
-			client_pending_fullscreen_state(c, 0);
-			client_pending_maximized_state(c, 0);
-			setfullscreen(c, false);
-		}
-	} else {
-		if (c->is_restoring_from_ov) {
-			c->is_restoring_from_ov = false;
-			resize(c, c->overview_backup_geom, 0);
-		}
-	}
-
-	if (c->bw == 0 &&
-		!c->isfullscreen) { // 如果是在ov模式中创建的窗口,没有bw记录
-		c->bw = c->isnoborder ? 0 : config.borderpx;
-	}
-
-	if (c->isfloating && !c->force_tiled_state) {
-		client_set_tiled(c, WLR_EDGE_NONE);
-	}
 }
 
 void handlecursoractivity(void) {
@@ -6531,6 +7108,40 @@ int32_t hidecursor(void *data) {
 void check_keep_idle_inhibit(Client *c) {
 	if (c && c->idleinhibit_when_focus && keep_idle_inhibit_source) {
 		wl_event_source_timer_update(keep_idle_inhibit_source, 1000);
+	}
+}
+
+void check_vrr_enable(Client *c) {
+
+	Monitor *m = c && c->mon ? c->mon : selmon;
+
+	if (!m)
+		return;
+
+	if (!c && m && !m->iscleanuping && m->is_vrr_enabling &&
+		!m->vrr_global_enable) {
+		disable_adaptive_sync(m, &m->pending);
+		mango_output_commit(m);
+		return;
+	}
+
+	if (!c)
+		return;
+
+	if (VISIBLEON(c, c->mon) && c->vrr_only_fullscreen && c->isfullscreen &&
+		!c->mon->is_vrr_enabling) {
+		enable_adaptive_sync(c->mon, &m->pending);
+		mango_output_commit(m);
+		return;
+	}
+
+	if (!c->mon->is_vrr_enabling && c->mon->vrr_global_enable) {
+		enable_adaptive_sync(c->mon, &m->pending);
+		mango_output_commit(m);
+	} else if (c->mon->is_vrr_enabling && !c->mon->vrr_global_enable &&
+			   (!c->vrr_only_fullscreen || !c->isfullscreen)) {
+		disable_adaptive_sync(c->mon, &m->pending);
+		mango_output_commit(m);
 	}
 }
 
@@ -6610,9 +7221,14 @@ void unmapnotify(struct wl_listener *listener, void *data) {
 
 	// If the client is in a stack, remove it from the stack
 
-	if (c->swallowedby) {
-		c->swallowedby->mon = c->mon;
-		swallow(c->swallowedby, c);
+	if (c->swallowing) {
+		c->swallowing->mon = c->mon;
+		client_replace(c->swallowing, c, false, true);
+	} else if ((c->group_next || c->group_prev) && c->isgroupfocusing) {
+		Client *group_replacement =
+			c->group_next ? c->group_next : c->group_prev;
+		group_replacement->mon = c->mon;
+		client_replace(group_replacement, c, false, false);
 	} else {
 		scroller_remove_client(c);
 		dwindle_remove_client(c);
@@ -6621,6 +7237,11 @@ void unmapnotify(struct wl_listener *listener, void *data) {
 	if (c == grabc) {
 		cursor_mode = CurNormal;
 		grabc = NULL;
+		if (dropc) {
+			dropc->enable_drop_area_draw = false;
+			client_set_drop_area(dropc);
+			dropc = NULL;
+		}
 	}
 
 	if (c == dropc) {
@@ -6640,16 +7261,16 @@ void unmapnotify(struct wl_listener *listener, void *data) {
 	}
 
 	if (c->mon && c->mon == selmon) {
-		if (next_node && !c->swallowedby) {
+		if (next_node && !c->swallowing) {
 			nextfocus = next_node->client;
-		} else if (prev_node && !c->swallowedby) {
+		} else if (prev_node && !c->swallowing) {
 			nextfocus = prev_node->client;
 		} else {
 			nextfocus = focustop(selmon);
 		}
 
 		if (nextfocus) {
-			focusclient(nextfocus, 0);
+			focusclient(nextfocus, 1);
 		}
 
 		if (!nextfocus && selmon->isoverview) {
@@ -6661,7 +7282,11 @@ void unmapnotify(struct wl_listener *listener, void *data) {
 	if (client_is_unmanaged(c)) {
 #ifdef XWAYLAND
 		if (client_is_x11(c)) {
-			wl_list_remove(&c->set_geometry.link);
+			if (c->set_geometry.link.prev && c->set_geometry.link.next &&
+				c->set_geometry.link.prev != &c->set_geometry.link) {
+				wl_list_remove(&c->set_geometry.link);
+				wl_list_init(&c->set_geometry.link);
+			}
 		}
 #endif
 		if (c == exclusive_focus)
@@ -6669,11 +7294,12 @@ void unmapnotify(struct wl_listener *listener, void *data) {
 		if (client_surface(c) == seat->keyboard_state.focused_surface)
 			focusclient(focustop(selmon), 1);
 	} else {
-		if (!c->swallowing)
-			wl_list_remove(&c->link);
+
+		client_group_detach(c);
+
+		wl_list_remove(&c->link);
 		setmon(c, NULL, 0, true);
-		if (!c->swallowing)
-			wl_list_remove(&c->flink);
+		wl_list_remove(&c->flink);
 	}
 
 	if (c->foreign_toplevel) {
@@ -6681,19 +7307,44 @@ void unmapnotify(struct wl_listener *listener, void *data) {
 		c->foreign_toplevel = NULL;
 	}
 
-	if (c->swallowedby) {
-		setmaximizescreen(c->swallowedby, c->ismaximizescreen);
-		setfullscreen(c->swallowedby, c->isfullscreen);
-		c->swallowedby->swallowing = NULL;
-		c->swallowedby = NULL;
+	if (c->ext_foreign_toplevel) {
+		wlr_ext_foreign_toplevel_handle_v1_destroy(c->ext_foreign_toplevel);
+		c->ext_foreign_toplevel = NULL;
 	}
 
 	if (c->swallowing) {
-		c->swallowing->swallowedby = NULL;
+		setmaximizescreen(c->swallowing, c->ismaximizescreen, true);
+		setfullscreen(c->swallowing, c->isfullscreen, true);
+		c->swallowing->swallowdby = NULL;
 		c->swallowing = NULL;
 	}
 
-	c->stack_proportion = 0.0f;
+	if (c->swallowdby) {
+		c->swallowdby->swallowing = NULL;
+		c->swallowdby = NULL;
+	}
+
+	if (c->jump_label_node) {
+		mango_jump_label_node_destroy(c->jump_label_node);
+		c->jump_label_node = NULL;
+	}
+
+	if (c->group_bar) {
+		mango_group_bar_destroy(c->group_bar);
+		c->group_bar = NULL;
+	}
+
+	if (c->image_capture_tree) {
+		wlr_scene_node_destroy(&c->image_capture_tree->node);
+		c->image_capture_tree = NULL;
+	}
+	if (c->image_capture_scene) {
+		wlr_scene_node_destroy(&c->image_capture_scene->tree.node);
+		c->image_capture_scene = NULL;
+	}
+
+	c->image_capture_source = NULL;
+	init_client_properties(c);
 
 	wlr_scene_node_destroy(&c->scene->node);
 	printstatus(IPC_WATCH_ARRANGGE);
@@ -6717,14 +7368,19 @@ void updatemons(struct wl_listener *listener, void *data) {
 
 	/* First remove from the layout the disabled monitors */
 	wl_list_for_each(m, &mons, link) {
-		if (m->wlr_output->enabled || m->asleep)
+		if (m->wlr_output->enabled)
 			continue;
 		config_head = wlr_output_configuration_head_v1_create(output_config,
 															  m->wlr_output);
 		config_head->state.enabled = 0;
+
+		if (m->only_sleep) {
+			continue;
+		}
 		/* Remove this output from the layout to avoid cursor enter inside
 		 * it */
 		wlr_output_layout_remove(output_layout, m->wlr_output);
+
 		closemon(m);
 		m->m = m->w = (struct wlr_box){0};
 	}
@@ -6760,6 +7416,14 @@ void updatemons(struct wl_listener *listener, void *data) {
 		mon_pos_offsety = m->m.y - oldy;
 
 		wl_list_for_each(c, &clients, link) {
+#ifdef XWAYLAND
+			// 显示器 scale 变化时，重新应用 XWayland 缩放并重配窗口
+			if (client_is_x11(c) && c->mon == m) {
+				xwayland_apply_scale(c);
+				if (client_surface(c)->mapped)
+					resize(c, c->geom, 0);
+			}
+#endif
 			// floating window position auto adjust the change of monitor
 			// position
 			if (c->isfloating && c->mon == m) {
@@ -6853,6 +7517,9 @@ void updatemons(struct wl_listener *listener, void *data) {
 	wlr_cursor_move(cursor, NULL, 0, 0);
 
 	wlr_output_manager_v1_set_configuration(output_mgr, output_config);
+
+	/* 布局变化后更新 xdg-output 详情 */
+	xdg_output_update_all();
 }
 
 void updatetitle(struct wl_listener *listener, void *data) {
@@ -6863,8 +7530,18 @@ void updatetitle(struct wl_listener *listener, void *data) {
 
 	const char *title;
 	title = client_get_title(c);
+	mango_group_bar_update(c->group_bar, title,
+						   c->mon ? c->mon->wlr_output->scale : 1.0f);
 	if (title && c->foreign_toplevel)
 		wlr_foreign_toplevel_handle_v1_set_title(c->foreign_toplevel, title);
+	if (title && c->ext_foreign_toplevel) {
+		wlr_ext_foreign_toplevel_handle_v1_update_state(
+			c->ext_foreign_toplevel,
+			&(struct wlr_ext_foreign_toplevel_handle_v1_state){
+				.title = title,
+				.app_id = c->ext_foreign_toplevel->app_id,
+			});
+	}
 	if (c == focustop(c->mon))
 		printstatus(IPC_WATCH_ARRANGGE);
 }
@@ -6926,10 +7603,13 @@ void view_in_mon(const Arg *arg, bool want_animation, Monitor *m,
 		if (arg->ui == (~0 & TAGMASK))
 			m->pertag->curtag = 0;
 		else {
-			for (i = 0; !(arg->ui & 1 << i) && i < LENGTH(tags) && arg->ui != 0;
+			for (i = 0; !(arg->ui & 1 << i) && i < (uint32_t)config.tag_num &&
+						arg->ui != 0;
 				 i++)
 				;
-			m->pertag->curtag = i >= LENGTH(tags) ? LENGTH(tags) : i + 1;
+			m->pertag->curtag = i >= (uint32_t)config.tag_num
+									? (uint32_t)config.tag_num
+									: i + 1;
 		}
 
 		m->pertag->prevtag =
@@ -6969,7 +7649,7 @@ handle_keyboard_shortcuts_inhibitor_destroy(struct wl_listener *listener,
 	KeyboardShortcutsInhibitor *inhibitor =
 		wl_container_of(listener, inhibitor, destroy);
 
-	wlr_log(WLR_DEBUG, "Removing keyboard shortcuts inhibitor");
+	mango_error(true, WLR_DEBUG, "Removing keyboard shortcuts inhibitor");
 
 	wl_list_remove(&inhibitor->link);
 	wl_list_remove(&inhibitor->destroy.link);
@@ -6998,7 +7678,7 @@ void handle_keyboard_shortcuts_inhibit_new_inhibitor(
 		return;
 	}
 
-	wlr_log(WLR_DEBUG, "Adding keyboard shortcuts inhibitor");
+	mango_error(true, WLR_DEBUG, "Adding keyboard shortcuts inhibitor");
 
 	KeyboardShortcutsInhibitor *kbsinhibitor =
 		calloc(1, sizeof(KeyboardShortcutsInhibitor));
@@ -7019,6 +7699,7 @@ void virtualkeyboard(struct wl_listener *listener, void *data) {
 	wlr_seat_set_capabilities(seat,
 							  seat->capabilities | WL_SEAT_CAPABILITY_KEYBOARD);
 	KeyboardGroup *group = createkeyboardgroup();
+	group->virtual_keyboard = &kb->keyboard;
 	/* Set the keymap to match the group keymap */
 	wlr_keyboard_set_keymap(&kb->keyboard, group->wlr_group->keyboard.keymap);
 	LISTEN(&kb->keyboard.base.events.destroy, &group->destroy,
@@ -7057,22 +7738,83 @@ void virtualpointer(struct wl_listener *listener, void *data) {
 }
 
 #ifdef XWAYLAND
-void fix_xwayland_unmanaged_coordinate(Client *c) {
+/* 获取当前 XWayland 客户端的 monitor（尚未绑定 monitor 时回退到 selmon） */
+static Monitor *xwayland_monitor(Client *c) {
+	Monitor *m = c ? c->mon : NULL;
+	if (!m)
+		m = selmon;
+	return m;
+}
+
+/* X11 坐标相对逻辑坐标的缩放：fzs 时为 monitor scale，否则为 1 */
+static float xwayland_client_scale(Client *c) {
+	if (config.xwayland_ignore_scale) {
+		Monitor *m = xwayland_monitor(c);
+		/* 用浮点 scale 保证窗口 1:1 精确显示 */
+		return m ? m->wlr_output->scale : 1.0f;
+	}
+	return 1.0f;
+}
+
+/* 提示 X11 客户端按何分辨率渲染 */
+static float xwayland_preferred_scale(Client *c) {
+	if (config.xwayland_ignore_scale)
+		return 1.0f;
+	Monitor *m = xwayland_monitor(c);
+	return m ? m->wlr_output->scale : 1.0f;
+}
+
+/* 更新 XWayland 缩放并通知客户端 */
+static void xwayland_apply_scale(Client *c) {
+	if (!client_is_x11(c) || !client_surface(c))
+		return;
+	c->xwayland_scale = xwayland_client_scale(c);
+	client_set_scale(client_surface(c), xwayland_preferred_scale(c));
+}
+
+/* wayland 逻辑坐标 -> X11 物理尺寸（X11 = 逻辑 * scale） */
+static void xwayland_logical_to_x11(struct wlr_box *box, float scale) {
+	if (scale <= 0.f)
+		scale = 1.f;
+	box->x = (int32_t)roundf(box->x * scale);
+	box->y = (int32_t)roundf(box->y * scale);
+	box->width = (int32_t)roundf(box->width * scale);
+	box->height = (int32_t)roundf(box->height * scale);
+}
+
+/* X11 物理尺寸 -> wayland 逻辑坐标（逻辑 = X11 / scale） */
+static void xwayland_x11_to_logical(struct wlr_box *box, float scale) {
+	if (scale <= 0.f)
+		scale = 1.f;
+	box->x = (int32_t)roundf(box->x / scale);
+	box->y = (int32_t)roundf(box->y / scale);
+	box->width = (int32_t)roundf(box->width / scale);
+	box->height = (int32_t)roundf(box->height / scale);
+}
+
+/* scene 处理后强制根 surface 铺满窗口矩形 */
+static void xwayland_scene_commit(struct wl_listener *listener, void *data) {
+	Client *c = wl_container_of(listener, c, scene_commit);
+	client_update_xwayland_dest_size(c);
+}
+
+void fix_xwayland_coordinate(struct wlr_box *geom) {
 	if (!selmon)
 		return;
 
 	// 1. 如果窗口已经在当前活动显示器内，直接返回
-	if (c->geom.x >= selmon->m.x && c->geom.x < selmon->m.x + selmon->m.width &&
-		c->geom.y >= selmon->m.y && c->geom.y < selmon->m.y + selmon->m.height)
+	if (geom->x >= selmon->m.x && geom->x <= selmon->m.x + selmon->m.width &&
+		geom->y >= selmon->m.y && geom->y <= selmon->m.y + selmon->m.height)
 		return;
 
-	c->geom = setclient_coordinate_center(c, selmon, c->geom, 0, 0);
+	geom->x = selmon->m.x + (selmon->m.width - geom->width) / 2;
+	geom->y = selmon->m.y + (selmon->m.height - geom->height) / 2;
 }
 
 int32_t synckeymap(void *data) {
 	reset_keyboard_layout();
 	// we only need to sync keymap once
-	wlr_log(WLR_INFO, "timer to synckeymap done");
+	mango_error(true, WLR_INFO, "timer to synckeymap done");
 	wl_event_source_timer_update(sync_keymap, 0);
 	return 0;
 }
@@ -7084,7 +7826,7 @@ void activatex11(struct wl_listener *listener, void *data) {
 	if (!c || c->iskilling || !c->foreign_toplevel || client_is_unmanaged(c))
 		return;
 
-	if (c && c->swallowing)
+	if (c && c->swallowdby)
 		return;
 
 	if (c->isminimized) {
@@ -7121,24 +7863,44 @@ void activatex11(struct wl_listener *listener, void *data) {
 void configurex11(struct wl_listener *listener, void *data) {
 	Client *c = wl_container_of(listener, c, configure);
 	struct wlr_xwayland_surface_configure_event *event = data;
+	struct wlr_box new_geo;
+	new_geo.x = event->x;
+	new_geo.y = event->y;
+	new_geo.width = event->width;
+	new_geo.height = event->height;
+	/* event 是 X11 物理尺寸，转回 wayland 逻辑坐标 */
+	xwayland_x11_to_logical(&new_geo, c->xwayland_scale);
+	fix_xwayland_coordinate(&new_geo);
+
 	if (!client_surface(c) || !client_surface(c)->mapped) {
-		wlr_xwayland_surface_configure(c->surface.xwayland, event->x, event->y,
-									   event->width, event->height);
+		struct wlr_box xgeo = new_geo;
+		xwayland_logical_to_x11(&xgeo, c->xwayland_scale);
+		wlr_xwayland_surface_configure(c->surface.xwayland, xgeo.x, xgeo.y,
+									   xgeo.width, xgeo.height);
 		return;
 	}
+
 	if (client_is_unmanaged(c)) {
-		wlr_scene_node_set_position(&c->scene->node, event->x, event->y);
-		wlr_xwayland_surface_configure(c->surface.xwayland, event->x, event->y,
-									   event->width, event->height);
+		struct wlr_box xgeo = new_geo;
+		xwayland_logical_to_x11(&xgeo, c->xwayland_scale);
+		wlr_scene_node_set_position(&c->scene->node, new_geo.x, new_geo.y);
+		wlr_xwayland_surface_configure(c->surface.xwayland, xgeo.x, xgeo.y,
+									   xgeo.width, xgeo.height);
 		return;
 	}
-	if ((c->isfloating && c != grabc) ||
-		!c->mon->pertag->ltidxs[c->mon->pertag->curtag]->arrange) {
+
+	if (c->isfloating && c != grabc) {
+		new_geo.x = new_geo.x - c->bw;
+		new_geo.y = new_geo.y - c->bw;
+		new_geo.width = new_geo.width + c->bw * 2;
+		new_geo.height = new_geo.height + c->bw * 2;
+		fix_xwayland_coordinate(&new_geo);
+
 		resize(c,
-			   (struct wlr_box){.x = event->x - c->bw,
-								.y = event->y - c->bw,
-								.width = event->width + c->bw * 2,
-								.height = event->height + c->bw * 2},
+			   (struct wlr_box){.x = new_geo.x,
+								.y = new_geo.y,
+								.width = new_geo.width,
+								.height = new_geo.height},
 			   0);
 	} else {
 		arrange(c->mon, false, false);
@@ -7153,6 +7915,7 @@ void createnotifyx11(struct wl_listener *listener, void *data) {
 	c = xsurface->data = ecalloc(1, sizeof(*c));
 	c->surface.xwayland = xsurface;
 	c->type = X11;
+	wl_list_init(&c->scene_commit.link);
 	/* Listen to the various events it can emit */
 	LISTEN(&xsurface->events.associate, &c->associate, associatex11);
 	LISTEN(&xsurface->events.destroy, &c->destroy, destroynotify);
@@ -7171,13 +7934,20 @@ void commitx11(struct wl_listener *listener, void *data) {
 	Client *c = wl_container_of(listener, c, commmitx11);
 	struct wlr_surface_state *state = &c->surface.xwayland->surface->current;
 
-	if ((int32_t)c->geom.width - 2 * (int32_t)c->bw == (int32_t)state->width &&
-		(int32_t)c->geom.height - 2 * (int32_t)c->bw ==
-			(int32_t)state->height &&
-		(int32_t)c->surface.xwayland->x ==
-			(int32_t)c->geom.x + (int32_t)c->bw &&
-		(int32_t)c->surface.xwayland->y ==
-			(int32_t)c->geom.y + (int32_t)c->bw) {
+	/* overview 卡片节点是独立的 scene_surface，提交后自动更新 */
+
+	/* state->width/height 与 xwayland->x/y 是 X11 物理尺寸（= c->geom * scale）
+	 */
+	float xscale = c->xwayland_scale > 0.f ? c->xwayland_scale : 1.f;
+	int32_t xw = (int32_t)roundf((c->geom.width - 2 * (int32_t)c->bw) * xscale);
+	int32_t xh =
+		(int32_t)roundf((c->geom.height - 2 * (int32_t)c->bw) * xscale);
+	int32_t xx = (int32_t)roundf((c->geom.x + (int32_t)c->bw) * xscale);
+	int32_t xy = (int32_t)roundf((c->geom.y + (int32_t)c->bw) * xscale);
+
+	if (xw == (int32_t)state->width && xh == (int32_t)state->height &&
+		(int32_t)c->surface.xwayland->x == xx &&
+		(int32_t)c->surface.xwayland->y == xy) {
 		c->configure_serial = 0;
 	}
 }
@@ -7195,6 +7965,9 @@ void dissociatex11(struct wl_listener *listener, void *data) {
 	wl_list_remove(&c->map.link);
 	wl_list_remove(&c->unmap.link);
 	wl_list_remove(&c->commmitx11.link);
+	wl_list_remove(&c->scene_commit.link);
+	c->xwl_root_buffer = NULL;
+	c->xwl_clip_active = false;
 }
 
 void sethints(struct wl_listener *listener, void *data) {
@@ -7216,12 +7989,18 @@ void xwaylandready(struct wl_listener *listener, void *data) {
 	/* assign the one and only seat */
 	wlr_xwayland_set_seat(xwayland, seat);
 
-	/* Set the default XWayland cursor to match the rest of dwl. */
-	if ((xcursor = wlr_xcursor_manager_get_xcursor(cursor_mgr, "default", 1)))
-		wlr_xwayland_set_cursor(
-			xwayland, xcursor->images[0]->buffer, xcursor->images[0]->width * 4,
-			xcursor->images[0]->width, xcursor->images[0]->height,
-			xcursor->images[0]->hotspot_x, xcursor->images[0]->hotspot_y);
+	/* 默认光标按 monitor scale 加载，避免 HiDPI 下被放大 */
+	float cursor_scale = selmon && selmon->wlr_output->scale > 0.f
+							 ? selmon->wlr_output->scale
+							 : 1.f;
+	if ((xcursor = wlr_xcursor_manager_get_xcursor(cursor_mgr, "default",
+												   cursor_scale))) {
+		struct wlr_xcursor_image *image = xcursor->images[0];
+		struct wlr_buffer *buffer = wlr_xcursor_image_get_buffer(image);
+		wlr_xwayland_set_cursor(xwayland, buffer, xcursor->images[0]->hotspot_x,
+								xcursor->images[0]->hotspot_y);
+	}
+
 	/* xwayland can't auto sync the keymap, so we do it manually
 	  and we need to wait the xwayland completely inited
 	*/
@@ -7230,9 +8009,15 @@ void xwaylandready(struct wl_listener *listener, void *data) {
 
 static void setgeometrynotify(struct wl_listener *listener, void *data) {
 	Client *c = wl_container_of(listener, c, set_geometry);
-
-	wlr_scene_node_set_position(&c->scene->node, c->surface.xwayland->x,
-								c->surface.xwayland->y);
+	struct wlr_box geo = {
+		.x = c->surface.xwayland->x,
+		.y = c->surface.xwayland->y,
+		.width = c->surface.xwayland->width,
+		.height = c->surface.xwayland->height,
+	};
+	/* xwayland->x/y 是 X11 物理尺寸，转回 wayland 逻辑坐标 */
+	xwayland_x11_to_logical(&geo, c->xwayland_scale);
+	wlr_scene_node_set_position(&c->scene->node, geo.x, geo.y);
 	motionnotify(0, NULL, 0, 0, 0, 0);
 }
 #endif
@@ -7250,7 +8035,7 @@ int32_t main(int32_t argc, char *argv[]) {
 			printf("mango " VERSION "\n");
 			return EXIT_SUCCESS;
 		} else if (c == 'c') {
-			cli_config_path = optarg;
+			snprintf(cli_config_path, sizeof(cli_config_path), "%s", optarg);
 		} else if (c == 'p') {
 			return parse_config() ? EXIT_SUCCESS : EXIT_FAILURE;
 		} else {
