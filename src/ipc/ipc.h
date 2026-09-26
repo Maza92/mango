@@ -522,6 +522,7 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 		// 5. Limpieza y refresco
 		is_migration_active = false;
 		cleanup_empty_dynamic_tags(src_mon);
+		view_in_mon(&(Arg){.ui = dest_tag_mask}, false, dest_mon, false);
 		arrange(src_mon, false, false);
 		arrange(dest_mon, false, false);
 		printstatus(IPC_WATCH_ARRANGGE);
