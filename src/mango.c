@@ -866,6 +866,7 @@ static void overview_backup(Client *c);
 static void set_minimized(Client *c);
 
 static void show_scratchpad(Client *c);
+static void client_recalculate_floating_geom(Client *c, Monitor *target_mon);
 static void show_hide_client(Client *c);
 static void tag_client(const Arg *arg, Client *target_client);
 
@@ -1323,6 +1324,65 @@ void client_pending_minimized_state(Client *c, int32_t isminimized) {
 													 isminimized);
 }
 
+static void client_recalculate_floating_geom(Client *c, Monitor *target_mon) {
+	if (!c || !target_mon)
+		return;
+
+	const char *appid = client_get_appid(c);
+	const char *title = client_get_title(c);
+	bool rule_matched = false;
+
+	if (!appid)
+		appid = broken;
+	if (!title)
+		title = broken;
+
+	for (uint32_t i = 0; i < config.window_rules_count; i++) {
+		const ConfigWinRule *r = &config.window_rules[i];
+		if (!is_window_rule_matches(r, appid, title, c->mark))
+			continue;
+
+		if (r->width > 1) {
+			c->float_geom.width = r->width;
+			rule_matched = true;
+		} else if (r->width > 0.0f && r->width <= 1.0f) {
+			c->float_geom.width = round(target_mon->m.width * r->width);
+			rule_matched = true;
+		}
+
+		if (r->height > 1) {
+			c->float_geom.height = r->height;
+			rule_matched = true;
+		} else if (r->height > 0.0f && r->height <= 1.0f) {
+			c->float_geom.height = round(target_mon->m.height * r->height);
+			rule_matched = true;
+		}
+
+		if (r->offsetx || r->offsety) {
+			c->float_geom = c->geom = setclient_coordinate_center(
+				c, target_mon, c->float_geom, r->offsetx, r->offsety);
+		} else {
+			c->float_geom = c->geom = setclient_coordinate_center(
+				c, target_mon, c->float_geom, 0, 0);
+		}
+	}
+
+	if (!rule_matched) {
+		if (c->is_in_scratchpad || c->isnamedscratchpad) {
+			c->float_geom.width = round(target_mon->w.width * config.scratchpad_width_ratio);
+			c->float_geom.height = round(target_mon->w.height * config.scratchpad_height_ratio);
+			c->float_geom = c->geom = setclient_coordinate_center(c, target_mon, c->float_geom, 0, 0);
+		} else if (c->mon && c->mon != target_mon && c->mon->m.width > 0 && c->mon->m.height > 0) {
+			c->float_geom.width = (int32_t)(c->float_geom.width * target_mon->m.width / c->mon->m.width);
+			c->float_geom.height = (int32_t)(c->float_geom.height * target_mon->m.height / c->mon->m.height);
+			c->float_geom = c->geom = setclient_coordinate_center(c, target_mon, c->float_geom, 0, 0);
+		}
+	}
+
+	if (!c->isnosizehint)
+		client_set_size_bound(c);
+}
+
 void show_scratchpad(Client *c) {
 	c->is_scratchpad_show = 1;
 	if (c->isfullscreen || c->ismaximizescreen) {
@@ -1331,8 +1391,10 @@ void show_scratchpad(Client *c) {
 		c->bw = c->isnoborder ? 0 : config.borderpx;
 	}
 
-	/* return if fullscreen */
-	if (!c->isfloating) {
+	if (c->isnamedscratchpad && c->mon) {
+		client_recalculate_floating_geom(c, c->mon);
+		resize(c, c->float_geom, 0);
+	} else if (!c->isfloating) {
 		setfloating(c, 1);
 		c->geom.width = c->iscustomsize
 							? c->float_geom.width
@@ -1489,14 +1551,8 @@ bool switch_scratchpad_client_state(Client *c) {
 		reset_foreign_tolevel(c, oldmon, c->mon);
 		client_update_oldmonname_record(c, selmon);
 
-		// 根据新monitor调整窗口尺寸
-		c->float_geom.width =
-			(int32_t)(c->float_geom.width * c->mon->w.width / oldmon->w.width);
-		c->float_geom.height = (int32_t)(c->float_geom.height *
-										 c->mon->w.height / oldmon->w.height);
-
-		c->float_geom =
-			setclient_coordinate_center(c, c->mon, c->float_geom, 0, 0);
+		// 根据新monitor调整窗口尺寸 (usa reglas o ratios sin degradar tamaño)
+		client_recalculate_floating_geom(c, selmon);
 
 		// 只有显示状态的scratchpad才需要聚焦和返回true
 		if (c->is_scratchpad_show) {
@@ -2963,12 +3019,13 @@ void closemon(Monitor *m) {
 					if (c->is_in_scratchpad && !c->is_scratchpad_show) {
 						c->mini_restore_tag = newtags;
 						c->oldtags = newtags;
-						// Recalcular y centrar coordenadas en selmon
-						c->float_geom.width = (int32_t)(c->float_geom.width * selmon->w.width / m->w.width);
-						c->float_geom.height = (int32_t)(c->float_geom.height * selmon->w.height / m->w.height);
-						c->float_geom = c->geom = setclient_coordinate_center(c, selmon, c->float_geom, 0, 0);
+						client_recalculate_floating_geom(c, selmon);
 					} else {
 						c->tags = newtags;
+						if (c->is_in_scratchpad && c->is_scratchpad_show) {
+							client_recalculate_floating_geom(c, selmon);
+							resize(c, c->float_geom, 0);
+						}
 					}
 				}
 
