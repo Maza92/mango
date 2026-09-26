@@ -3944,7 +3944,9 @@ void free_config(void) {
 	cleanup_config_keymap();
 }
 
-void update_global_var(void) { tagmask = ((uint32_t)1 << config.tag_num) - 1; }
+void update_global_var(void) {
+	tagmask = config.tag_num >= 32 ? ~0U : ((uint32_t)1 << config.tag_num) - 1;
+}
 
 void override_config(void) {
 	config.animations = CLAMP_INT(config.animations, 0, 1);
@@ -4174,7 +4176,7 @@ void set_value_default() {
 	config.new_is_master = 1;
 	config.default_mfact = 0.55f;
 	config.default_nmaster = 1;
-	config.tag_num = 9;
+	config.tag_num = 32;
 	config.center_master_overspread = 0;
 	config.center_when_single_stack = 1;
 
@@ -4882,7 +4884,7 @@ void reset_option(void) {
 void reset_tag(int old_tag_num) {
 
 	if (config.tag_num != old_tag_num) {
-		uint32_t last_tag_mask = (uint32_t)1 << (config.tag_num - 1);
+		uint32_t last_tag_mask = config.tag_num >= 32 ? (1U << 31) : (uint32_t)1 << (config.tag_num - 1);
 		Client *c = NULL;
 		Monitor *m = NULL;
 

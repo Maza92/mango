@@ -2422,6 +2422,7 @@ void add_tag(const Arg *arg) {
 	}
 
 	selmon->active_tags_mask |= (1U << (new_tag_idx - 1));
+	selmon->tags_had_clients_mask &= ~(1U << (new_tag_idx - 1));
 	refresh_monitors_workspaces_status(selmon);
 	arrange(selmon, false, false);
 	printstatus(IPC_WATCH_ARRANGGE);

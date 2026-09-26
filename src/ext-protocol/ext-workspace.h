@@ -256,6 +256,8 @@ void sync_workspaces_to_tag_num(Monitor *m) {
 		}
 		// 补充缺失的tag
 		for (int32_t i = 1; i <= config.tag_num; i++) {
+			if (!(m->active_tags_mask & (1U << (i - 1))))
+				continue;
 			bool exists = false;
 			wl_list_for_each(w, &workspaces, link) {
 				if (w->m == m && w->tag == i) {

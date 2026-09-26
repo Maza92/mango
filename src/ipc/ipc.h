@@ -407,6 +407,7 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 		}
 
 		selmon->active_tags_mask |= (1U << (new_tag_idx - 1));
+		selmon->tags_had_clients_mask &= ~(1U << (new_tag_idx - 1));
 		refresh_monitors_workspaces_status(selmon);
 
 		view(&(Arg){.ui = 1U << (new_tag_idx - 1)}, true);
