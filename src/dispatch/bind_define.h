@@ -2410,7 +2410,7 @@ void add_tag(const Arg *arg) {
 		return;
 
 	int new_tag_idx = -1;
-	for (int i = 0; i < 32; i++) {
+	for (int i = config.initial_tags_count; i < 32; i++) {
 		if (!(selmon->active_tags_mask & (1U << i))) {
 			new_tag_idx = i + 1;
 			break;
@@ -2432,16 +2432,16 @@ void remove_tag(const Arg *arg) {
 	if (!selmon)
 		return;
 
-	// By default, find the highest active tag to remove
+	// By default, find the highest active dynamic tag to remove
 	int tag_idx = -1;
-	for (int i = 31; i >= 0; i--) {
+	for (int i = 31; i >= config.initial_tags_count; i--) {
 		if (selmon->active_tags_mask & (1U << i)) {
 			tag_idx = i + 1;
 			break;
 		}
 	}
 
-	if (tag_idx == -1)
+	if (tag_idx <= config.initial_tags_count)
 		return;
 
 	int active_count = 0;

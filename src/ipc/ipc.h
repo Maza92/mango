@@ -86,7 +86,6 @@ static cJSON *build_tags_json(Monitor *m) {
 		if (!(m->active_tags_mask & (1U << (tag - 1))))
 			continue;
 		int numclients = 0;
-		uint32_t client_status = 0;
 		bool is_active = false, is_urgent = false;
 		bool is_migrated = false;
 		const char *source_monitor = "";
@@ -95,14 +94,12 @@ static cJSON *build_tags_json(Monitor *m) {
 		if (tagmask & m->tagset[m->seltags])
 			is_active = true;
 		wl_list_for_each(c, &clients, link) {
-			client_status = get_tag_status(tag, m);
-
-			if (!client_status)
+			if (c->mon != m || !(c->tags & tagmask) || c->is_logic_hide)
 				continue;
 
-			if (client_status == 2)
+			if (c->isurgent)
 				is_urgent = true;
-			if (c->oldmonname[0] != '\0') {
+			if (tag > config.initial_tags_count && c->oldmonname[0] != '\0') {
 				is_migrated = true;
 				source_monitor = c->oldmonname;
 				if (c->oldmon_tags) {
@@ -400,7 +397,7 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 		}
 
 		int new_tag_idx = -1;
-		for (int i = 0; i < 32; i++) {
+		for (int i = config.initial_tags_count; i < 32; i++) {
 			if (!(selmon->active_tags_mask & (1U << i))) {
 				new_tag_idx = i + 1;
 				break;
@@ -621,7 +618,7 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 		}
 
 		if (tag_idx == -1) {
-			for (int i = 31; i >= 0; i--) {
+			for (int i = 31; i >= config.initial_tags_count; i--) {
 				if (selmon->active_tags_mask & (1U << i)) {
 					tag_idx = i + 1;
 					break;
@@ -629,8 +626,8 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 			}
 		}
 
-		if (tag_idx < 1 || tag_idx > 32 || !(selmon->active_tags_mask & (1U << (tag_idx - 1)))) {
-			send_static_json(client_fd, "{\"error\":\"invalid or inactive tag index\"}\n");
+		if (tag_idx <= config.initial_tags_count || tag_idx > 32 || !(selmon->active_tags_mask & (1U << (tag_idx - 1)))) {
+			send_static_json(client_fd, "{\"error\":\"invalid or inactive dynamic tag index\"}\n");
 			return;
 		}
 
