@@ -87,34 +87,20 @@ static cJSON *build_tags_json(Monitor *m) {
 			continue;
 		int numclients = 0;
 		bool is_active = false, is_urgent = false;
-		bool is_migrated = false;
-		const char *source_monitor = "";
-		int source_tag = 0;
 		uint32_t tagmask = 1 << (tag - 1);
 		if (tagmask & m->tagset[m->seltags])
 			is_active = true;
 		wl_list_for_each(c, &clients, link) {
 			if (c->mon != m || !(c->tags & tagmask) || c->is_logic_hide)
 				continue;
-
 			if (c->isurgent)
 				is_urgent = true;
-			if (tag > config.initial_tags_count && c->oldmonname[0] != '\0') {
-				is_migrated = true;
-				source_monitor = c->oldmonname;
-				if (c->oldmon_tags) {
-					source_tag = get_tags_first_tag_num(c->oldmon_tags);
-				}
-			}
 			numclients++;
 		}
 		cJSON *tag_obj = cJSON_CreateObject();
 		cJSON_AddNumberToObject(tag_obj, "index", tag);
 		cJSON_AddBoolToObject(tag_obj, "is_active", is_active);
 		cJSON_AddBoolToObject(tag_obj, "is_urgent", is_urgent);
-		cJSON_AddBoolToObject(tag_obj, "is_migrated", is_migrated);
-		cJSON_AddStringToObject(tag_obj, "source_monitor", source_monitor);
-		cJSON_AddNumberToObject(tag_obj, "source_tag", source_tag);
 		cJSON_AddStringToObject(tag_obj, "layout",
 								m->pertag->ltidxs[tag]->symbol);
 		cJSON_AddNumberToObject(tag_obj, "client_count", numclients);
@@ -438,10 +424,21 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 		cJSON_AddStringToObject(resp, "monitor", selmon->wlr_output->name);
 	} else if (strncmp(cmd, "move_tag ", 9) == 0) {
 		int tag_idx = -1;
+		char arg1[256] = "", arg2[256] = "", arg3[256] = "";
+		int parsed = sscanf(cmd + 9, "%255s %255s %255s", arg1, arg2, arg3);
+
+		char src_mon_name[256] = "";
 		char dest_mon_name[256] = "";
 
-		if (sscanf(cmd + 9, "%d %255s", &tag_idx, dest_mon_name) != 2) {
-			send_static_json(client_fd, "{\"error\":\"usage: move_tag <tag_index> <destination_monitor>\"}\n");
+		if (parsed == 3) {
+			strncpy(src_mon_name, arg1, sizeof(src_mon_name) - 1);
+			tag_idx = atoi(arg2);
+			strncpy(dest_mon_name, arg3, sizeof(dest_mon_name) - 1);
+		} else if (parsed == 2) {
+			tag_idx = atoi(arg1);
+			strncpy(dest_mon_name, arg2, sizeof(dest_mon_name) - 1);
+		} else {
+			send_static_json(client_fd, "{\"error\":\"usage: move_tag [source_monitor] <tag_index> <destination_monitor>\"}\n");
 			return;
 		}
 
@@ -452,30 +449,33 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 			return;
 		}
 
-		// 1. Buscar monitor destino
-		Monitor *dest_mon = NULL;
-		Monitor *m;
-		wl_list_for_each(m, &mons, link) {
-			if (strcmp(m->wlr_output->name, dest_mon_name) == 0) {
-				dest_mon = m;
-				break;
-			}
-		}
+		// 1. Monitor destino
+		Monitor *dest_mon = monitor_by_name(dest_mon_name);
 		if (!dest_mon || !dest_mon->wlr_output->enabled) {
 			send_static_json(client_fd, "{\"error\":\"destination monitor not found or disabled\"}\n");
 			return;
 		}
 
-		// 2. Buscar monitor origen que tenga activo ese tag
+		// 2. Monitor origen
 		Monitor *src_mon = NULL;
-		wl_list_for_each(m, &mons, link) {
-			if (m->wlr_output->enabled && (m->active_tags_mask & (1U << (tag_idx - 1)))) {
-				src_mon = m;
-				break;
+		if (src_mon_name[0] != '\0') {
+			src_mon = monitor_by_name(src_mon_name);
+			if (!src_mon || !src_mon->wlr_output->enabled || !(src_mon->active_tags_mask & (1U << (tag_idx - 1)))) {
+				send_static_json(client_fd, "{\"error\":\"source monitor not found or tag index not active on it\"}\n");
+				return;
+			}
+		} else {
+			Monitor *m;
+			wl_list_for_each(m, &mons, link) {
+				if (m->wlr_output->enabled && m != dest_mon && (m->active_tags_mask & (1U << (tag_idx - 1)))) {
+					src_mon = m;
+					break;
+				}
 			}
 		}
+
 		if (!src_mon) {
-			send_static_json(client_fd, "{\"error\":\"tag index is not active on any monitor\"}\n");
+			send_static_json(client_fd, "{\"error\":\"tag index is not active on any source monitor\"}\n");
 			return;
 		}
 
@@ -508,45 +508,14 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 			return;
 		}
 
-		// 4. Mover clientes del tag en src_mon al dest_mon
+		// 4. Mover clientes normales (scratchpads permanecen independientes)
 		dest_mon->active_tags_mask |= dest_tag_mask;
 		is_migration_active = true;
 
-		Client *c;
-		wl_list_for_each(c, &clients, link) {
-			if (c->mon == src_mon) {
-				bool is_target = false;
-				if (!c->is_in_scratchpad && (c->tags & src_tag_mask)) {
-					is_target = true;
-				} else if (c->is_in_scratchpad && c->is_tag_bound) {
-					if ((c->is_scratchpad_show && (c->tags & src_tag_mask)) ||
-						(!c->is_scratchpad_show && (c->mini_restore_tag & src_tag_mask))) {
-						is_target = true;
-					}
-				}
-
-				if (is_target) {
-					// Guardar historial para reporte de migración
-					memset(c->oldmonname, 0, sizeof(c->oldmonname));
-					strncpy(c->oldmonname, src_mon->wlr_output->name, sizeof(c->oldmonname) - 1);
-					c->oldmon_tags = src_tag_mask;
-
-					// Si es un scratchpad, actualizar su tag atado al nuevo tag de destino y recalcular coordenadas
-					if (c->is_in_scratchpad) {
-						if (c->is_scratchpad_show) {
-							c->tags = dest_tag_mask;
-						} else {
-							c->mini_restore_tag = dest_tag_mask;
-							c->oldtags = dest_tag_mask;
-						}
-						c->float_geom.width = (int32_t)(c->float_geom.width * dest_mon->w.width / src_mon->w.width);
-						c->float_geom.height = (int32_t)(c->float_geom.height * dest_mon->w.height / src_mon->w.height);
-						c->float_geom = c->geom = setclient_coordinate_center(c, dest_mon, c->float_geom, 0, 0);
-					}
-
-					// Cambiar de monitor
-					setmon(c, dest_mon, dest_tag_mask, true);
-				}
+		Client *c, *tmp;
+		wl_list_for_each_safe(c, tmp, &clients, link) {
+			if (c->mon == src_mon && !c->is_in_scratchpad && (c->tags & src_tag_mask)) {
+				setmon(c, dest_mon, dest_tag_mask, false);
 			}
 		}
 
