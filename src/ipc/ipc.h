@@ -515,8 +515,16 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 
 		Client *c, *tmp;
 		wl_list_for_each_safe(c, tmp, &clients, link) {
-			if (c->mon == src_mon && !c->is_in_scratchpad && (c->tags & src_tag_mask)) {
-				setmon(c, dest_mon, dest_tag_mask, false);
+			if (c->mon == src_mon) {
+				if (!c->is_in_scratchpad && (c->tags & src_tag_mask)) {
+					setmon(c, dest_mon, dest_tag_mask, false);
+				} else if (c->is_in_scratchpad && c->is_scratchpad_show && (c->tags & src_tag_mask)) {
+					setmon(c, dest_mon, dest_tag_mask, false);
+					c->oldtags = dest_tag_mask;
+					c->mini_restore_tag = dest_tag_mask;
+					client_recalculate_floating_geom(c, dest_mon);
+					resize(c, c->float_geom, 0);
+				}
 			}
 		}
 
