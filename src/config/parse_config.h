@@ -50,6 +50,7 @@ typedef struct {
 	bool islockapply;
 	bool isreleaseapply;
 	bool ispassapply;
+	bool isinhibitapply;
 	int line_number;
 	int file_index;
 } KeyBinding;
@@ -589,6 +590,9 @@ void parse_bind_flags(const char *str, KeyBinding *kb) {
 			break;
 		case 'p':
 			kb->ispassapply = true;
+			break;
+		case 'i':
+			kb->isinhibitapply = true;
 			break;
 		default:
 			mango_error(false, WLR_ERROR, "Unknown bind flag: %c\n", suffix[i]);
@@ -2837,7 +2841,7 @@ bool parse_option(Config *config, char *key, char *value, int line_number) {
 
 		config->exec_once_count++;
 
-	} else if (regex_match("^bind[s|l|r|p]*$", key)) {
+	} else if (regex_match("^bind[s|l|r|p|i]*$", key)) {
 		config->key_bindings =
 			realloc(config->key_bindings,
 					(config->key_bindings_count + 1) * sizeof(KeyBinding));
@@ -4450,6 +4454,7 @@ void set_default_key_bindings(Config *config) {
 		b = &config->key_bindings[config->key_bindings_count + i];
 		b->iscommonmode = true;
 		b->islockapply = true;
+		b->isinhibitapply = true;
 		b->line_number = 0;
 		strcpy(b->mode, "common");
 	}

@@ -4684,15 +4684,18 @@ keybinding(uint32_t state, bool locked, uint32_t mods, xkb_keysym_t sym,
 	const KeyBinding *k;
 	int32_t ji;
 
-	if (is_keyboard_shortcut_inhibitor(seat->keyboard_state.focused_surface)) {
-		return false;
-	}
+	bool is_inhibited =
+		is_keyboard_shortcut_inhibitor(seat->keyboard_state.focused_surface);
 
 	for (ji = 0; ji < config.key_bindings_count; ji++) {
 		if (config.key_bindings_count < 1)
 			break;
 
 		if (locked && config.key_bindings[ji].islockapply == false)
+			continue;
+
+		// Skip binding if client inhibits shortcuts and binding lacks bypass flag
+		if (is_inhibited && config.key_bindings[ji].isinhibitapply == false)
 			continue;
 
 		if (state == WL_KEYBOARD_KEY_STATE_RELEASED &&

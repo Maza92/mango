@@ -22,6 +22,7 @@ bind[flags]=MODIFIERS,KEY,COMMAND,PARAMETERS
 - `s`: Uses keysym instead of keycode to bind.
 - `r`: Triggers on key release instead of press.
 - `p`: Pass key event to client.
+- `i`: Works even when shortcuts are inhibited by client (e.g. VM or remote desktop).
 
 **Examples:**
 
