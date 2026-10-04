@@ -628,6 +628,8 @@ struct Monitor {
 	int8_t carousel_anim_dir;
 	uint32_t active_tags_mask;
 	uint32_t tags_had_clients_mask;
+	uint32_t tags_pending_spawn_mask;
+	uint64_t tag_spawn_time[32];
 	bool vrr_global_enable;
 	bool is_vrr_enabling;
 	bool hdr_enable;
@@ -931,6 +933,7 @@ wlr_scene_tree_snapshot(struct wlr_scene_node *node,
 static bool is_scroller_layout(Monitor *m);
 static bool is_monocle_layout(Monitor *m);
 static bool is_centertile_layout(Monitor *m);
+static bool is_focus_layout(Monitor *m);
 static void create_output(struct wlr_backend *backend, void *data);
 static void get_layout_abbr(char *abbr, const char *full_name);
 static void apply_named_scratchpad(Client *target_client);
@@ -1157,6 +1160,7 @@ struct Pertag {
 	struct DwindleNode *dwindle_root[LENGTH(tags) + 1];
 	const Layout *ltidxs[LENGTH(tags) + 1];
 	struct TagScrollerState *scroller_state[LENGTH(tags) + 1];
+	char tag_names[LENGTH(tags) + 1][64];
 };
 #include "common/log.h"
 #include "config/parse_config.h"
@@ -1245,6 +1249,7 @@ int32_t pending_scratchpad_is_tag_bound = 0;
 #include "layout/arrange.h"
 #include "layout/dwindle.h"
 #include "layout/horizontal.h"
+#include "layout/focus.h"
 #include "layout/overview.h"
 #include "layout/scroll.h"
 #include "layout/vertical.h"
@@ -3726,6 +3731,8 @@ void createmon(struct wl_listener *listener, void *data) {
 	m->carousel_anim_dir = 0;
 	m->active_tags_mask = config.initial_tags_count >= 32 ? ~0U : (1U << config.initial_tags_count) - 1;
 	m->tags_had_clients_mask = 0;
+	m->tags_pending_spawn_mask = 0;
+	memset(m->tag_spawn_time, 0, sizeof(m->tag_spawn_time));
 	m->vrr_global_enable = false;
 	m->is_vrr_enabling = false;
 	m->hdr_enable = false;
@@ -3948,10 +3955,21 @@ static void cleanup_empty_dynamic_tags(Monitor *m) {
 			}
 			if (has_clients) {
 				m->tags_had_clients_mask |= tag_mask;
+				m->tags_pending_spawn_mask &= ~tag_mask;
 			} else {
 				// If it's the selected tag and it hasn't had clients yet, don't remove it (allow the user to open the first app)
 				if ((m->tagset[m->seltags] & tag_mask) && !(m->tags_had_clients_mask & tag_mask)) {
 					continue;
+				}
+
+				if (m->tags_pending_spawn_mask & tag_mask) {
+					struct timespec ts;
+					clock_gettime(CLOCK_MONOTONIC, &ts);
+					uint64_t now_ms = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+					if (now_ms - m->tag_spawn_time[i - 1] < 30000) {
+						continue;
+					}
+					m->tags_pending_spawn_mask &= ~tag_mask;
 				}
 
 				Client *c_scr, *tmp_scr;
@@ -3979,6 +3997,8 @@ static void cleanup_empty_dynamic_tags(Monitor *m) {
 
 				m->active_tags_mask &= ~tag_mask;
 				m->tags_had_clients_mask &= ~tag_mask;
+				m->tags_pending_spawn_mask &= ~tag_mask;
+				m->pertag->tag_names[i][0] = '\0';
 				changed = true;
 
 				if (m->tagset[m->seltags] & tag_mask) {

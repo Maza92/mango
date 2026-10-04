@@ -16,6 +16,10 @@ bool check_hit_no_border(Client *c) {
 		hit_no_border = true;
 	}
 
+	if (c->mon && !c->mon->isoverview && is_focus_layout(c->mon)) {
+		hit_no_border = true;
+	}
+
 	if (config.no_border_when_single && c && c->mon &&
 		((ISSCROLLTILED(c) && c->mon->visible_scroll_tiling_clients == 1) ||
 		 c->mon->visible_clients == 1)) {

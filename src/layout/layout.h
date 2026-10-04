@@ -14,6 +14,7 @@ static void vertical_deck(Monitor *mon);
 static void dwindle(Monitor *m);
 static void fair(Monitor *m);
 static void vertical_fair(Monitor *m);
+static void focus_layout(Monitor *m);
 
 /* layout(s) */
 Layout overviewlayout = {"󰃇", overview, "overview"};
@@ -33,6 +34,7 @@ enum {
 	DWINDLE,
 	FAIR,
 	VERTICAL_FAIR,
+	LAYOUT_FOCUS,
 };
 
 Layout layouts[] = {
@@ -53,4 +55,5 @@ Layout layouts[] = {
 	{"DW", dwindle, "dwindle", DWINDLE},
 	{"F", fair, "fair", FAIR},
 	{"VF", vertical_fair, "vertical_fair", VERTICAL_FAIR},
+	{"FC", focus_layout, "focus", LAYOUT_FOCUS},
 };

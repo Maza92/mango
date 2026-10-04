@@ -103,6 +103,11 @@ static cJSON *build_tags_json(Monitor *m) {
 		cJSON_AddBoolToObject(tag_obj, "is_urgent", is_urgent);
 		cJSON_AddStringToObject(tag_obj, "layout",
 								m->pertag->ltidxs[tag]->symbol);
+		cJSON_AddStringToObject(tag_obj, "layout_name",
+								m->pertag->ltidxs[tag]->name);
+		if (m->pertag->tag_names[tag][0] != '\0') {
+			cJSON_AddStringToObject(tag_obj, "name", m->pertag->tag_names[tag]);
+		}
 		cJSON_AddNumberToObject(tag_obj, "client_count", numclients);
 		cJSON_AddItemToArray(tags_array, tag_obj);
 	}
@@ -396,18 +401,60 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 		}
 
 		char *spawn_cmd = NULL;
+		char tag_name[64] = "";
+		char layout_name[32] = "";
+
 		if (strlen(cmd) > 7 && cmd[7] == ' ') {
-			spawn_cmd = cmd + 8;
-			while (*spawn_cmd == ' ') {
-				spawn_cmd++;
+			char *payload = cmd + 8;
+			while (*payload == ' ') {
+				payload++;
 			}
-			if (strlen(spawn_cmd) == 0) {
-				spawn_cmd = NULL;
+			if (*payload == '{') {
+				cJSON *req = cJSON_Parse(payload);
+				if (req) {
+					cJSON *c_item = cJSON_GetObjectItem(req, "cmd");
+					if (c_item && cJSON_IsString(c_item)) {
+						spawn_cmd = strdup(c_item->valuestring);
+					}
+					cJSON *n_item = cJSON_GetObjectItem(req, "name");
+					if (n_item && cJSON_IsString(n_item)) {
+						strncpy(tag_name, n_item->valuestring, sizeof(tag_name) - 1);
+					}
+					cJSON *l_item = cJSON_GetObjectItem(req, "layout");
+					if (l_item && cJSON_IsString(l_item)) {
+						strncpy(layout_name, l_item->valuestring, sizeof(layout_name) - 1);
+					}
+					cJSON_Delete(req);
+				}
+			} else if (strlen(payload) > 0) {
+				spawn_cmd = strdup(payload);
 			}
 		}
 
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		uint64_t now_ms = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+
 		selmon->active_tags_mask |= (1U << (new_tag_idx - 1));
 		selmon->tags_had_clients_mask &= ~(1U << (new_tag_idx - 1));
+		selmon->tags_pending_spawn_mask |= (1U << (new_tag_idx - 1));
+		selmon->tag_spawn_time[new_tag_idx - 1] = now_ms;
+
+		if (tag_name[0] != '\0') {
+			strncpy(selmon->pertag->tag_names[new_tag_idx], tag_name, sizeof(selmon->pertag->tag_names[new_tag_idx]) - 1);
+		} else {
+			selmon->pertag->tag_names[new_tag_idx][0] = '\0';
+		}
+
+		if (layout_name[0] != '\0') {
+			for (int jk = 0; jk < LENGTH(layouts); jk++) {
+				if (strcmp(layouts[jk].name, layout_name) == 0) {
+					selmon->pertag->ltidxs[new_tag_idx] = &layouts[jk];
+					break;
+				}
+			}
+		}
+
 		refresh_monitors_workspaces_status(selmon);
 
 		view(&(Arg){.ui = 1U << (new_tag_idx - 1)}, true);
@@ -417,12 +464,18 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 
 		if (spawn_cmd) {
 			spawn_shell(&(Arg){.v = spawn_cmd});
+			free(spawn_cmd);
 		}
 
 		resp = cJSON_CreateObject();
 		cJSON_AddBoolToObject(resp, "success", true);
 		cJSON_AddNumberToObject(resp, "index", new_tag_idx);
 		cJSON_AddStringToObject(resp, "monitor", selmon->wlr_output->name);
+		if (tag_name[0] != '\0') {
+			cJSON_AddStringToObject(resp, "name", tag_name);
+		}
+		cJSON_AddStringToObject(resp, "layout", selmon->pertag->ltidxs[new_tag_idx]->symbol);
+		cJSON_AddStringToObject(resp, "layout_name", selmon->pertag->ltidxs[new_tag_idx]->name);
 	} else if (strncmp(cmd, "move_tag ", 9) == 0) {
 		int tag_idx = -1;
 		char arg1[256] = "", arg2[256] = "", arg3[256] = "";
@@ -527,6 +580,10 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 				}
 			}
 		}
+
+		strncpy(dest_mon->pertag->tag_names[dest_tag_idx], src_mon->pertag->tag_names[tag_idx], sizeof(dest_mon->pertag->tag_names[dest_tag_idx]) - 1);
+		dest_mon->pertag->ltidxs[dest_tag_idx] = src_mon->pertag->ltidxs[tag_idx];
+		src_mon->pertag->tag_names[tag_idx][0] = '\0';
 
 		// 5. Limpieza y refresco
 		is_migration_active = false;
@@ -693,6 +750,8 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 
 		selmon->active_tags_mask &= ~tag_mask;
 		selmon->tags_had_clients_mask &= ~tag_mask;
+		selmon->tags_pending_spawn_mask &= ~tag_mask;
+		selmon->pertag->tag_names[tag_idx][0] = '\0';
 		cJSON_AddNumberToObject(resp, "active_tags_mask_after", selmon->active_tags_mask);
 
 		if (selmon->tagset[selmon->seltags] & tag_mask) {
