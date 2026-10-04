@@ -5544,7 +5544,8 @@ void motionnotify(uint32_t time, struct wlr_input_device *device, double dx,
 							 .y = (int32_t)round(cursor->y) - grabcy,
 							 .width = grabc->geom.width,
 							 .height = grabc->geom.height};
-		if (config.drag_tile_to_tile && grabc->drag_to_tile) {
+		if (config.drag_tile_to_tile && grabc->drag_to_tile &&
+			!is_focus_layout(grabc->mon)) {
 			closet_drop_client = find_closest_tiled_client(grabc);
 			if (closet_drop_client && dropc && closet_drop_client != dropc) {
 				dropc->enable_drop_area_draw = false;
