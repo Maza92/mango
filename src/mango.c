@@ -933,7 +933,6 @@ wlr_scene_tree_snapshot(struct wlr_scene_node *node,
 static bool is_scroller_layout(Monitor *m);
 static bool is_monocle_layout(Monitor *m);
 static bool is_centertile_layout(Monitor *m);
-static bool is_focus_layout(Monitor *m);
 static void create_output(struct wlr_backend *backend, void *data);
 static void get_layout_abbr(char *abbr, const char *full_name);
 static void apply_named_scratchpad(Client *target_client);
@@ -1249,7 +1248,6 @@ int32_t pending_scratchpad_is_tag_bound = 0;
 #include "layout/arrange.h"
 #include "layout/dwindle.h"
 #include "layout/horizontal.h"
-#include "layout/focus.h"
 #include "layout/overview.h"
 #include "layout/scroll.h"
 #include "layout/vertical.h"
@@ -5544,8 +5542,7 @@ void motionnotify(uint32_t time, struct wlr_input_device *device, double dx,
 							 .y = (int32_t)round(cursor->y) - grabcy,
 							 .width = grabc->geom.width,
 							 .height = grabc->geom.height};
-		if (config.drag_tile_to_tile && grabc->drag_to_tile &&
-			!is_focus_layout(grabc->mon)) {
+		if (config.drag_tile_to_tile && grabc->drag_to_tile) {
 			closet_drop_client = find_closest_tiled_client(grabc);
 			if (closet_drop_client && dropc && closet_drop_client != dropc) {
 				dropc->enable_drop_area_draw = false;

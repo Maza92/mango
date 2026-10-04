@@ -444,7 +444,7 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 			selmon->pertag->tag_names[new_tag_idx][0] = '\0';
 		}
 
-		selmon->pertag->ltidxs[new_tag_idx] = &layouts[LAYOUT_FOCUS];
+		selmon->pertag->ltidxs[new_tag_idx] = &layouts[TILE];
 
 		refresh_monitors_workspaces_status(selmon);
 
