@@ -248,9 +248,11 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 
 	strncpy(cmd, cmd_raw, sizeof(cmd) - 1);
 	cmd[sizeof(cmd) - 1] = '\0';
-	for (char *p = cmd; *p; p++)
-		if (*p == ',')
-			*p = ' ';
+	if (strncmp(cmd, "dispatch ", 9) == 0) {
+		for (char *p = cmd + 9; *p; p++)
+			if (*p == ',')
+				*p = ' ';
+	}
 
 	if (strcmp(cmd, "get version") == 0) {
 		resp = cJSON_CreateObject();
@@ -402,31 +404,27 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 
 		char *spawn_cmd = NULL;
 		char tag_name[64] = "";
-		char layout_name[32] = "";
 
 		if (strlen(cmd) > 7 && cmd[7] == ' ') {
 			char *payload = cmd + 8;
 			while (*payload == ' ') {
 				payload++;
 			}
-			if (*payload == '{') {
-				cJSON *req = cJSON_Parse(payload);
-				if (req) {
-					cJSON *c_item = cJSON_GetObjectItem(req, "cmd");
-					if (c_item && cJSON_IsString(c_item)) {
-						spawn_cmd = strdup(c_item->valuestring);
+			if (strncmp(payload, "name:", 5) == 0) {
+				char *space = strchr(payload + 5, ' ');
+				if (space) {
+					size_t nlen = space - (payload + 5);
+					if (nlen < sizeof(tag_name)) {
+						strncpy(tag_name, payload + 5, nlen);
+						tag_name[nlen] = '\0';
 					}
-					cJSON *n_item = cJSON_GetObjectItem(req, "name");
-					if (n_item && cJSON_IsString(n_item)) {
-						strncpy(tag_name, n_item->valuestring, sizeof(tag_name) - 1);
+					payload = space + 1;
+					while (*payload == ' ') {
+						payload++;
 					}
-					cJSON *l_item = cJSON_GetObjectItem(req, "layout");
-					if (l_item && cJSON_IsString(l_item)) {
-						strncpy(layout_name, l_item->valuestring, sizeof(layout_name) - 1);
-					}
-					cJSON_Delete(req);
 				}
-			} else if (strlen(payload) > 0) {
+			}
+			if (strlen(payload) > 0) {
 				spawn_cmd = strdup(payload);
 			}
 		}
@@ -446,14 +444,7 @@ static void handle_command(int client_fd, const char *cmd_raw) {
 			selmon->pertag->tag_names[new_tag_idx][0] = '\0';
 		}
 
-		if (layout_name[0] != '\0') {
-			for (int jk = 0; jk < LENGTH(layouts); jk++) {
-				if (strcmp(layouts[jk].name, layout_name) == 0) {
-					selmon->pertag->ltidxs[new_tag_idx] = &layouts[jk];
-					break;
-				}
-			}
-		}
+		selmon->pertag->ltidxs[new_tag_idx] = &layouts[LAYOUT_FOCUS];
 
 		refresh_monitors_workspaces_status(selmon);
 
