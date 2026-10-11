@@ -347,13 +347,18 @@ void layer_animation_next_tick(LayerSurface *l) {
 	int32_t y = l->animation.initial.y +
 				(l->current.y - l->animation.initial.y) * factor;
 
-	double opacity_eased_progress =
-		find_animation_curve_at(animation_passed, OPAFADEIN);
-
-	double opacity = MANGO_MIN(config.fadein_begin_opacity +
-								   opacity_eased_progress *
-									   (1.0 - config.fadein_begin_opacity),
-							   1.0f);
+	// Only the open animation fades in. A resize or move of a mapped layer also runs through
+	// here, and re-running the fade made it dip to fadein_begin_opacity and come back on every
+	// size change (e.g. a launcher growing while typing).
+	double opacity = 1.0;
+	if (l->animation.action == OPEN) {
+		double opacity_eased_progress =
+			find_animation_curve_at(animation_passed, OPAFADEIN);
+		opacity = MANGO_MIN(config.fadein_begin_opacity +
+								opacity_eased_progress *
+									(1.0 - config.fadein_begin_opacity),
+							1.0f);
+	}
 
 	if (config.animation_fade_in) {
 		if (config.blur && !l->noblur && !config.blur_optimized) {

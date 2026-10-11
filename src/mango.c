@@ -366,7 +366,6 @@ struct Client {
 	struct wlr_scene_tree *image_capture_tree;
 	struct wlr_scene *image_capture_scene;
 	struct wlr_ext_image_capture_source_v1 *image_capture_source;
-	struct wlr_scene_surface *image_capture_scene_surface;
 	struct wlr_scene_tree *overview_scene_surface;
 	MangoJumpLabel *jump_label_node;
 	MangoGroupBar *group_bar;
@@ -5210,8 +5209,10 @@ mapnotify(struct wl_listener *listener, void *data) {
 	c->ext_foreign_toplevel = wlr_ext_foreign_toplevel_handle_v1_create(
 		foreign_toplevel_list, &foreign_toplevel_state);
 	c->ext_foreign_toplevel->data = c;
-	c->image_capture_scene_surface = wlr_scene_surface_create(
-		&c->image_capture_scene->tree, client_surface(c));
+	// Same subsurface tree as the visible scene: Firefox draws its content in a subsurface,
+	// so capturing only the main surface made its window captures come out black.
+	wlr_scene_subsurface_tree_create(&c->image_capture_scene->tree,
+									 client_surface(c));
 
 	/* Handle unmanaged clients first so we can return prior create borders
 	 */
