@@ -184,6 +184,11 @@ void set_arrange_hidden(Monitor *m, Client *c, bool want_animation) {
 		if (client_animations_enabled(c) && !c->animation.tagouted) {
 			c->animation.tagouting = true;
 			c->animation.tagining = false;
+			/* Hiding a scratchpad while another one stays visible: the other
+			 * is focused and on top, so the slide-out would play behind it.
+			 * Draw the leaving window above for the length of the animation;
+			 * it ignores the pointer meanwhile. */
+			wlr_scene_node_raise_to_top(&c->scene->node);
 			c->pending = c->geom;
 			c->pending.y = c->mon->m.y - c->geom.height;
 			resize(c, c->geom, (ResizeOpts){.interact = 0});
