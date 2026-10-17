@@ -141,8 +141,7 @@ cJSON *build_tags_json(Monitor *m) {
 		cJSON_AddStringToObject(tag_obj, "layout_name",
 								m->pertag->ltidxs[tag]->name);
 		if (m->pertag->tag_names[tag][0] != '\0')
-			cJSON_AddStringToObject(tag_obj, "name",
-									m->pertag->tag_names[tag]);
+			cJSON_AddStringToObject(tag_obj, "name", m->pertag->tag_names[tag]);
 		cJSON_AddNumberToObject(tag_obj, "client_count", numclients);
 		cJSON_AddItemToArray(tags_array, tag_obj);
 	}
@@ -619,7 +618,8 @@ cJSON *build_client_json(Client *c) {
 	cJSON_AddBoolToObject(obj, "is_namedscratchpad", c->isnamedscratchpad);
 	cJSON_AddBoolToObject(obj, "is_migrated", c->oldmonname[0] != '\0');
 	cJSON_AddStringToObject(obj, "source_monitor", c->oldmonname);
-	cJSON_AddItemToObject(obj, "source_tags", tags_mask_to_array(c->oldmon_tags));
+	cJSON_AddItemToObject(obj, "source_tags",
+						  tags_mask_to_array(c->oldmon_tags));
 	cJSON_AddNumberToObject(obj, "x", c->geom.x);
 	cJSON_AddNumberToObject(obj, "y", c->geom.y);
 	cJSON_AddNumberToObject(obj, "width", c->geom.width);
@@ -734,7 +734,8 @@ void handle_command(int client_fd, const char *cmd_raw) {
 		char mark_name[256] = "";
 		if (sscanf(cmd + 19, "%255s", mark_name) != 1) {
 			send_static_json(
-				client_fd, "{\"error\":\"usage: get client_by_mark <mark>\"}\n");
+				client_fd,
+				"{\"error\":\"usage: get client_by_mark <mark>\"}\n");
 			return;
 		}
 		Client *target = NULL;
@@ -922,8 +923,7 @@ void handle_command(int client_fd, const char *cmd_raw) {
 		int32_t idx;
 
 		if (!m) {
-			send_static_json(client_fd,
-							 "{\"error\":\"no focused monitor\"}\n");
+			send_static_json(client_fd, "{\"error\":\"no focused monitor\"}\n");
 			return;
 		}
 		if (dyn_tag_first_free(m) < 0) {
@@ -985,8 +985,7 @@ void handle_command(int client_fd, const char *cmd_raw) {
 		int32_t nwords;
 
 		if (!m) {
-			send_static_json(client_fd,
-							 "{\"error\":\"no focused monitor\"}\n");
+			send_static_json(client_fd, "{\"error\":\"no focused monitor\"}\n");
 			return;
 		}
 
@@ -1158,7 +1157,8 @@ void handle_command(int client_fd, const char *cmd_raw) {
 			src_mon->pertag->ltidxs[tag_idx];
 		dest_mon->pertag->nmasters[dest_tag_idx] =
 			src_mon->pertag->nmasters[tag_idx];
-		dest_mon->pertag->mfacts[dest_tag_idx] = src_mon->pertag->mfacts[tag_idx];
+		dest_mon->pertag->mfacts[dest_tag_idx] =
+			src_mon->pertag->mfacts[tag_idx];
 		src_mon->pertag->tag_names[tag_idx][0] = '\0';
 
 		server.is_migration_active = false;
@@ -1193,14 +1193,12 @@ void handle_command(int client_fd, const char *cmd_raw) {
 		}
 		Monitor *target_mon = monitor_by_name(mon_name);
 		if (!target_mon) {
-			send_static_json(client_fd,
-							 "{\"error\":\"monitor not found\"}\n");
+			send_static_json(client_fd, "{\"error\":\"monitor not found\"}\n");
 			return;
 		}
 		if (!monitor_tag_active(target_mon, tag_idx)) {
-			send_static_json(
-				client_fd,
-				"{\"error\":\"invalid or inactive tag index\"}\n");
+			send_static_json(client_fd,
+							 "{\"error\":\"invalid or inactive tag index\"}\n");
 			return;
 		}
 		focus_monitor(&(Arg){.v = mon_name, .i = UNDIR});

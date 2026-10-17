@@ -1692,8 +1692,17 @@ int32_t toggle_named_scratchpad(const Arg *arg) {
 	target_client = get_client_by_id_or_title(arg_id, arg_title);
 
 	if (!target_client && arg->v3) {
-		/* The client that maps next claims this mark (see client_apply_rules) */
+		/* A named scratchpad is a singleton: while its first window is still
+		 * on the way, another press must not spawn a second one. */
+		if (server.pending_scratchpad_mark && arg_id &&
+			strcmp(server.pending_scratchpad_mark, arg_id) == 0 &&
+			get_now_in_ms() - server.pending_scratchpad_time < 5000)
+			return 0;
+
+		/* The client that maps next claims this mark (see client_apply_rules)
+		 */
 		free(server.pending_scratchpad_mark);
+		server.pending_scratchpad_time = get_now_in_ms();
 		server.pending_scratchpad_mark = strdup(arg_id);
 		server.pending_scratchpad_is_tag_bound = (arg->i == -1) ? 0 : arg->i;
 		Arg arg_spawn = {.v = arg->v3};

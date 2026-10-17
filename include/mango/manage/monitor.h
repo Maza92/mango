@@ -81,8 +81,8 @@ struct Monitor {
 	/* tags that exist on this monitor; tags beyond config.initial_tags_count
 	 * are dynamic: opened by add_tag, closed by remove_tag or auto-removal */
 	uint32_t active_tags_mask;
-	uint32_t tags_had_clients_mask;	   /* dynamic tags that held a client */
-	uint32_t tags_pending_spawn_mask;  /* dynamic tags waiting for a spawn */
+	uint32_t tags_had_clients_mask;		  /* dynamic tags that held a client */
+	uint32_t tags_pending_spawn_mask;	  /* dynamic tags waiting for a spawn */
 	uint64_t tag_spawn_time[tag_num_MAX]; /* ms, when the spawn was requested */
 	bool vrr_global_enable;
 	bool is_vrr_enabling;

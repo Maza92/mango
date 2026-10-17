@@ -1647,7 +1647,8 @@ void client_apply_rules(Client *c, Monitor **rule_mon, uint32_t *rule_tags) {
 	if (!c)
 		return;
 
-	/* Claim the mark of the named scratchpad whose spawn produced this client */
+	/* Claim the mark of the named scratchpad whose spawn produced this client
+	 */
 	if (server.pending_scratchpad_mark) {
 		free(c->mark);
 		c->mark = server.pending_scratchpad_mark;
@@ -3783,12 +3784,12 @@ void client_recalculate_floating_geom(Client *c, Monitor *target_mon) {
 				client_center_geometry(c, target_mon, c->float_geom, 0, 0);
 		} else if (c->mon && c->mon != target_mon && c->mon->m.width > 0 &&
 				   c->mon->m.height > 0) {
-			c->float_geom.width = (int32_t)(c->float_geom.width *
-											target_mon->m.width /
-											c->mon->m.width);
-			c->float_geom.height = (int32_t)(c->float_geom.height *
-											 target_mon->m.height /
-											 c->mon->m.height);
+			c->float_geom.width =
+				(int32_t)(c->float_geom.width * target_mon->m.width /
+						  c->mon->m.width);
+			c->float_geom.height =
+				(int32_t)(c->float_geom.height * target_mon->m.height /
+						  c->mon->m.height);
 			c->float_geom = c->geom =
 				client_center_geometry(c, target_mon, c->float_geom, 0, 0);
 		}

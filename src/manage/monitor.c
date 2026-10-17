@@ -979,8 +979,8 @@ void monitor_close(Monitor *m) {
 				if (newtags != 0) {
 					if (hidden) {
 						c->oldtags = newtags;
-						client_recalculate_floating_geom(c,
-														 server.selected_monitor);
+						client_recalculate_floating_geom(
+							c, server.selected_monitor);
 					} else {
 						c->tags = newtags;
 						if (SCRATCHPAD_SHOWN(c)) {
@@ -1153,8 +1153,8 @@ void handle_output_layout_change(struct wl_listener *listener, void *data) {
 				strcmp(c->oldmonname, m->wlr_output->name) == 0) {
 				/* a client that sat on a dynamic tag stays where its tag was
 				 * remapped to; the others go back with their old tags */
-				uint32_t original_tags = c->oldmon_tags ? c->oldmon_tags
-														: c->tags;
+				uint32_t original_tags =
+					c->oldmon_tags ? c->oldmon_tags : c->tags;
 				bool is_dynamic = false;
 				int32_t bit;
 

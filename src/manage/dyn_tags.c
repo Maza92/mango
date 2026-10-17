@@ -163,8 +163,8 @@ void dyn_tag_evict_clients(Monitor *m, uint32_t tag_mask, uint32_t *ids,
 			continue;
 
 		hidden_scratchpad = c->is_in_scratchpad && c->isminimized;
-		on_tag = hidden_scratchpad ? (c->oldtags & tag_mask)
-								   : (c->tags & tag_mask);
+		on_tag =
+			hidden_scratchpad ? (c->oldtags & tag_mask) : (c->tags & tag_mask);
 		if (!on_tag)
 			continue;
 
@@ -239,13 +239,13 @@ void cleanup_empty_dynamic_tags(Monitor *m) {
 
 		/* The tag being looked at that never held a client yet stays, so the
 		 * first application can still be opened on it. */
-		if ((m->tagset[m->seltags] & bit) &&
-			!(m->tags_had_clients_mask & bit))
+		if ((m->tagset[m->seltags] & bit) && !(m->tags_had_clients_mask & bit))
 			continue;
 
 		/* a spawn was requested together with the tag: give it time */
 		if (m->tags_pending_spawn_mask & bit) {
-			if ((uint32_t)(get_now_in_ms() - (uint32_t)m->tag_spawn_time[i - 1]) <
+			if ((uint32_t)(get_now_in_ms() -
+						   (uint32_t)m->tag_spawn_time[i - 1]) <
 				DYN_TAG_SPAWN_GRACE_MS)
 				continue;
 			m->tags_pending_spawn_mask &= ~bit;
