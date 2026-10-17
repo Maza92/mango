@@ -309,6 +309,8 @@ static int toml_bind_flag_char(const char *word) {
 		return 'p';
 	if (strcmp(word, "conflict") == 0)
 		return 'c';
+	if (strcmp(word, "inhibit") == 0)
+		return 'i';
 	return 0;
 }
 

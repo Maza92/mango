@@ -316,6 +316,7 @@ void set_default_key_bindings(Config *config) {
 		b = &config->key_bindings[config->key_bindings_count + i];
 		b->iscommonmode = true;
 		b->islockapply = true;
+		b->isinhibitapply = true;
 		b->line_number = 0;
 		strcpy(b->mode, "common");
 	}

@@ -117,6 +117,7 @@ The bind flag (the letters in `bindl` / `bindc` / ...) becomes a further suffix:
 | `bindr` | `.release` |
 | `bindp` | `.pass` |
 | `bindc` | `.conflict` |
+| `bindi` | `.inhibit` |
 
 ```ini
 bindc=SUPER,a,resizewin,+10,0

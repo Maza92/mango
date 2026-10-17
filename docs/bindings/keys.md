@@ -23,6 +23,7 @@ bind[flags]=MODIFIERS,KEY,COMMAND,PARAMETERS
 - `r`: Triggers on key release instead of press.
 - `p`: Pass key event to client.
 - `c`: allow keybind conflict(need set in all conflict key).
+- `i`: Works even when shortcuts are inhibited by a client (e.g. VM or remote desktop).
 
 > **Info:** `c` has no effect on the `reload_config` and `load_config_file` dispatches, which always stop the current key event.
 

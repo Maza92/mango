@@ -593,13 +593,16 @@ int32_t keyboard_check_keybinding(uint32_t state, bool is_locked, uint32_t mods,
 	const KeyBinding *k;
 	int32_t ji;
 
-	if (is_keyboard_shortcut_inhibitor(
-			server.seat->keyboard_state.focused_surface)) {
-		return false;
-	}
+	bool is_inhibited = is_keyboard_shortcut_inhibitor(
+		server.seat->keyboard_state.focused_surface);
 
 	for (ji = 0; ji < config.key_bindings_count; ji++) {
 		if (is_locked && config.key_bindings[ji].islockapply == false)
+			continue;
+
+		/* A client inhibiting shortcuts only lets bindings with the `i` flag
+		 * through. */
+		if (is_inhibited && config.key_bindings[ji].isinhibitapply == false)
 			continue;
 
 		if (state == WL_KEYBOARD_KEY_STATE_RELEASED &&
