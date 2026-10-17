@@ -62,6 +62,7 @@ Control the transparency and roundness of your windows.
 | `no_radius_when_single` | `0` | Disable radius if only one window is visible. |
 | `focused_opacity` | `1.0` | Opacity for the active window (0.0 - 1.0). |
 | `unfocused_opacity` | `1.0` | Opacity for inactive windows (0.0 - 1.0). |
+| `unfocused_dim` | `0.0` | Black overlay on inactive windows, as an alpha (0.0 - 1.0). Works without `dim_enable` and overrides `dim_unfocused_color` for the windows it applies to. Also available as a window rule. |
 
 ```ini
 # Window corner radius in pixels

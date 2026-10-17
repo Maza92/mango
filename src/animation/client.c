@@ -536,7 +536,7 @@ void client_draw_dim(Client *c, struct ivec2 clip_box) {
 		return;
 	}
 
-	if (!config.dim_enable) {
+	if (!config.dim_enable && !client_has_own_dim(c)) {
 		mango_dim_node_set_enabled(c->dim_node, false);
 		return;
 	}
@@ -702,6 +702,8 @@ void client_draw_border(Client *c, struct ivec2 offsets) {
 			wlr_scene_node_set_enabled(&c->border->node, false);
 			wlr_scene_node_set_position(&c->scene_surface->node, 0, 0);
 		}
+		/* a fullscreen client sits at the origin of its scene, border or not */
+		wlr_scene_node_set_position(&c->scene_surface->node, 0, 0);
 		return;
 	} else {
 		if (!c->border->node.enabled)

@@ -157,6 +157,7 @@ typedef struct {
 	int32_t no_blur;
 	float focused_opacity;
 	float unfocused_opacity;
+	float unfocused_dim; /* black overlay alpha on unfocused windows */
 	float scroller_proportion_single;
 	uint32_t passmod;
 	xkb_keysym_t keysym;
@@ -365,6 +366,7 @@ typedef struct {
 	double gesture_swipe_min_speed_to_force;
 	float focused_opacity;
 	float unfocused_opacity;
+	float unfocused_dim; /* black overlay alpha on unfocused windows */
 	float *scroller_proportion_preset;
 	int32_t scroller_proportion_preset_count;
 

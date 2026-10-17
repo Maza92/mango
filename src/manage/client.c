@@ -1299,13 +1299,43 @@ float *get_border_color(Client *c) {
 	}
 }
 
+/* A client with its own unfocused_dim (the option or the window rule) dims
+ * in black by that alpha, whether or not dim_enable is set. */
+bool client_has_own_dim(Client *c) { return c->unfocused_dim > 0.0f; }
+
+/* Recompute the dim colour of an unfocused client after unfocused_dim
+ * changed, and start its focus animation from there. */
+void client_sync_unfocused_dim(Client *c) {
+	const float *unfocused;
+
+	c->dim_unfocused_color[0] = 0.0f;
+	c->dim_unfocused_color[1] = 0.0f;
+	c->dim_unfocused_color[2] = 0.0f;
+	c->dim_unfocused_color[3] = c->unfocused_dim;
+
+	if (server.selected_monitor && server.selected_monitor->sel == c)
+		return;
+
+	unfocused = client_has_own_dim(c) ? c->dim_unfocused_color
+									  : config.dim_unfocused_color;
+	memcpy(c->opacity_animation.initial_dim_color, unfocused,
+		   sizeof(c->opacity_animation.initial_dim_color));
+	memcpy(c->opacity_animation.current_dim_color, unfocused,
+		   sizeof(c->opacity_animation.current_dim_color));
+}
+
 float *get_dim_color(Client *c) {
+	static float no_dim[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
 	if (server.selected_monitor && server.selected_monitor->sel == c) {
+		/* with only its own dim, a focused client is not dimmed */
+		if (client_has_own_dim(c) && !config.dim_enable)
+			return no_dim;
 		return config.dim_focused_color;
-	} else {
-		return config.dim_unfocused_color;
 	}
+
+	return client_has_own_dim(c) ? c->dim_unfocused_color
+								 : config.dim_unfocused_color;
 }
 
 int32_t is_single_bit_set(uint32_t x) { return x && !(x & (x - 1)); }
@@ -1524,6 +1554,10 @@ void apply_rule_properties(Client *c, const ConfigWinRule *r) {
 	APPLY_FLOAT_PROP(c, r, scroller_proportion_single);
 	APPLY_FLOAT_PROP(c, r, focused_opacity);
 	APPLY_FLOAT_PROP(c, r, unfocused_opacity);
+	if (r->unfocused_dim >= 0.0f) {
+		c->unfocused_dim = r->unfocused_dim;
+		client_sync_unfocused_dim(c);
+	}
 
 	APPLY_INT_PROP(c, r, animation_type_open);
 	APPLY_INT_PROP(c, r, animation_type_close);
@@ -2154,6 +2188,7 @@ void init_client_properties(Client *c) {
 	c->fake_no_border = false;
 	c->focused_opacity = config.focused_opacity;
 	c->unfocused_opacity = config.unfocused_opacity;
+	c->unfocused_dim = config.unfocused_dim;
 	c->no_focus = 0;
 	c->no_fade_in = 0;
 	c->no_fade_out = 0;
@@ -2206,6 +2241,7 @@ void init_client_properties(Client *c) {
 		   sizeof(c->opacity_animation.initial_dim_color));
 	memcpy(c->opacity_animation.current_dim_color, config.dim_unfocused_color,
 		   sizeof(c->opacity_animation.current_dim_color));
+	client_sync_unfocused_dim(c);
 	c->opacity_animation.initial_opacity = c->unfocused_opacity;
 	c->opacity_animation.current_opacity = c->unfocused_opacity;
 	c->animation.tagining = false;

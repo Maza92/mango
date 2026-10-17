@@ -194,6 +194,8 @@ struct Client {
 	int32_t isunglobal;
 	float focused_opacity;
 	float unfocused_opacity;
+	float unfocused_dim;
+	float dim_unfocused_color[4]; /* black at unfocused_dim, when it is set */
 	char oldmonname[128];
 	uint32_t oldmon_tags; /* tags the client had on the monitor it left */
 	int32_t no_blur;
@@ -354,6 +356,8 @@ Client *client_focus_top(Monitor *m);
 Client *get_next_stack_client(Client *c, bool reverse);
 float *get_border_color(Client *c);
 float *get_dim_color(Client *c);
+bool client_has_own_dim(Client *c);
+void client_sync_unfocused_dim(Client *c);
 
 int32_t is_single_bit_set(uint32_t x);
 bool client_only_in_one_tag(Client *c);

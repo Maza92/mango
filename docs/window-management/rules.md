@@ -70,6 +70,7 @@ window_rule_once=Parameter:Values,Parameter:Values,app_id:Values,title:Values
 | `no_animation` | integer | `0` / `1` | Not apply animation |
 | `focused_opacity` | integer | `0` / `1` | Window focused opacity |
 | `unfocused_opacity` | integer | `0` / `1` | Window unfocused opacity |
+| `unfocused_dim` | float | `0.0` - `1.0` | Black overlay alpha while the window is unfocused |
 | `allow_csd` | integer | `0` / `1` | Allow client side decoration |
 | `confine_pointer` | integer | `0` / `1` | While this window is focused and visible, force the cursor to stay inside it (does not require the client to use the pointer constraints protocol) |
 
