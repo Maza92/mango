@@ -30,6 +30,7 @@ description: Control mangowm programmatically using mmsg.
 | `get monitor <name>` | Returns full JSON details for a specific monitor. |
 | `get focusing-client` | Returns full JSON details for the client currently in focus. |
 | `get client <id>` | Returns full JSON details for a client with the given ID. |
+| `get client_by_mark <mark>` | Returns full JSON details for the client carrying the given mark. |
 | `get tag <mon> <idx>` | Queries status of a specific tag on a monitor. |
 | `get tags <mon>` | Returns a JSON object containing the status of all tags on a monitor. |
 | `get all-clients` | Returns a JSON array of all active clients. |
@@ -71,6 +72,9 @@ mmsg watch all-monitors
 # watch all tags
 mmsg watch all-tags
 ```
+
+### MARK
+* `mark_client <id> <mark>`: give a client a mark (`none` clears it). The mark is reported as `mark` in the client JSON.
 
 ### DISPATCH
 Allows sending commands to the compositor to alter its state.

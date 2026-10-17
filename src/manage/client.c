@@ -913,12 +913,18 @@ Client *get_client_by_id_or_title(const char *arg_id, const char *arg_title) {
 	Client *target_client = NULL;
 	const char *appid, *title;
 	Client *c = NULL;
-	wl_list_for_each(c, &server.clients, link) {
-		if (!config.scratchpad_cross_monitor &&
-			c->mon != server.selected_monitor) {
-			continue;
-		}
 
+	/* A mark names exactly one client; it wins over app_id and title. */
+	if (arg_id && strncmp(arg_id, "none", 4) != 0) {
+		wl_list_for_each(c, &server.clients, link) {
+			if (c->mark && strcmp(c->mark, arg_id) == 0)
+				return c;
+		}
+	}
+
+	/* No monitor filter: a named scratchpad is a singleton that follows the
+	 * focused monitor, so it has to be found wherever it currently is. */
+	wl_list_for_each(c, &server.clients, link) {
 		if (c->swallowing) {
 			appid = client_get_appid(c->swallowing);
 			title = client_get_title(c->swallowing);
@@ -1008,7 +1014,15 @@ client_center_geometry(Client *c, Monitor *tm, struct wlr_box geom,
 
 /* Helper: Check if rule matches client */
 bool is_window_rule_matches(const ConfigWinRule *r, const char *appid,
-							const char *title) {
+							const char *title, const char *mark) {
+	/* A rule with a mark only applies to the client carrying that mark; app_id
+	 * and title, when also given, narrow it further. */
+	if (r->mark) {
+		if (!mark || strcmp(r->mark, mark) != 0)
+			return false;
+		if (!r->id && !r->title)
+			return true;
+	}
 	return (r->title && regex_match(r->title, title) && !r->id) ||
 		   (r->id && regex_match(r->id, appid) && !r->title) ||
 		   (r->id && regex_match(r->id, appid) && r->title &&
@@ -1208,6 +1222,15 @@ Client *client_focus_top(Monitor *m) {
 
 	if (!m) {
 		return NULL;
+	}
+
+	/* Prefer a client that is not pinned, so closing a window does not hand
+	 * focus to a global (pinned) one while a regular window is available. */
+	wl_list_for_each(c, &server.focus_stack, flink) {
+		if (c->iskilling || c->isunglobal || c->isglobal)
+			continue;
+		if (VISIBLEON(c, m) && client_surface(c)->mapped)
+			return c;
 	}
 
 	wl_list_for_each(c, &server.focus_stack, flink) {
@@ -1584,6 +1607,17 @@ void client_apply_rules(Client *c, Monitor **rule_mon, uint32_t *rule_tags) {
 	if (!c)
 		return;
 
+	/* Claim the mark of the named scratchpad whose spawn produced this client */
+	if (server.pending_scratchpad_mark) {
+		free(c->mark);
+		c->mark = server.pending_scratchpad_mark;
+		server.pending_scratchpad_mark = NULL;
+		c->isnamedscratchpad = 1;
+		c->isfloating = 1;
+		c->is_tag_bound = server.pending_scratchpad_is_tag_bound;
+		server.pending_scratchpad_is_tag_bound = 0;
+	}
+
 	parent = client_get_parent(c);
 
 	Monitor *mon =
@@ -1603,7 +1637,7 @@ void client_apply_rules(Client *c, Monitor **rule_mon, uint32_t *rule_tags) {
 		r = &config.window_rules[i];
 
 		// rule matching
-		if (!is_window_rule_matches(r, appid, title))
+		if (!is_window_rule_matches(r, appid, title, c->mark))
 			continue;
 
 		if (r->is_once && r->is_once_applied) {
@@ -1617,6 +1651,11 @@ void client_apply_rules(Client *c, Monitor **rule_mon, uint32_t *rule_tags) {
 
 		// set general properties
 		apply_rule_properties(c, r);
+
+		if (r->mark) {
+			free(c->mark);
+			c->mark = strdup(r->mark);
+		}
 
 		// // set tags
 		if (r->tags) {
@@ -2095,6 +2134,7 @@ void init_client_properties(Client *c) {
 	c->isunglobal = 0;
 	c->is_in_scratchpad = 0;
 	c->isnamedscratchpad = 0;
+	c->is_tag_bound = 0;
 	c->need_float_size_reduce = 0;
 	c->is_clip_to_hide = 0;
 	c->is_restoring_from_ov = 0;
@@ -2702,6 +2742,7 @@ void handle_client_destroy(struct wl_listener *listener, void *data) {
 	}
 	switcher_remove_client(c);
 	pointer_client_destroyed(c);
+	free(c->mark);
 	free(c);
 }
 
@@ -3640,6 +3681,73 @@ void client_pending_minimized_state(Client *c, int32_t isminimized) {
 													 isminimized);
 }
 
+/* Recompute the floating geometry of a client for target_mon from its window
+ * rules, falling back to the scratchpad ratios (or a proportional rescale when
+ * the client moves between monitors) when no rule gives a size. */
+void client_recalculate_floating_geom(Client *c, Monitor *target_mon) {
+	uint32_t i;
+	const ConfigWinRule *r;
+	const char *appid, *title;
+	bool rule_matched = false;
+
+	if (!c || !target_mon)
+		return;
+
+	if (!(appid = client_get_appid(c)))
+		appid = broken;
+	if (!(title = client_get_title(c)))
+		title = broken;
+
+	for (i = 0; i < config.window_rules_count; i++) {
+		r = &config.window_rules[i];
+		if (!is_window_rule_matches(r, appid, title, c->mark))
+			continue;
+
+		if (r->width > 1) {
+			c->float_geom.width = r->width;
+			rule_matched = true;
+		} else if (r->width > 0.0f && r->width <= 1.0f) {
+			c->float_geom.width = round(target_mon->m.width * r->width);
+			rule_matched = true;
+		}
+
+		if (r->height > 1) {
+			c->float_geom.height = r->height;
+			rule_matched = true;
+		} else if (r->height > 0.0f && r->height <= 1.0f) {
+			c->float_geom.height = round(target_mon->m.height * r->height);
+			rule_matched = true;
+		}
+
+		c->float_geom = c->geom = client_center_geometry(
+			c, target_mon, c->float_geom, r->offsetx, r->offsety);
+	}
+
+	if (!rule_matched) {
+		if (c->is_in_scratchpad || c->isnamedscratchpad) {
+			c->float_geom.width =
+				round(target_mon->w.width * config.scratchpad_width_ratio);
+			c->float_geom.height =
+				round(target_mon->w.height * config.scratchpad_height_ratio);
+			c->float_geom = c->geom =
+				client_center_geometry(c, target_mon, c->float_geom, 0, 0);
+		} else if (c->mon && c->mon != target_mon && c->mon->m.width > 0 &&
+				   c->mon->m.height > 0) {
+			c->float_geom.width = (int32_t)(c->float_geom.width *
+											target_mon->m.width /
+											c->mon->m.width);
+			c->float_geom.height = (int32_t)(c->float_geom.height *
+											 target_mon->m.height /
+											 c->mon->m.height);
+			c->float_geom = c->geom =
+				client_center_geometry(c, target_mon, c->float_geom, 0, 0);
+		}
+	}
+
+	if (!c->no_size_hint)
+		client_set_size_bound(c);
+}
+
 void show_scratchpad(Client *c) {
 	if (c->isfullscreen || c->ismaximizescreen) {
 		client_pending_fullscreen_state(c, 0);
@@ -3647,8 +3755,10 @@ void show_scratchpad(Client *c) {
 		c->bw = c->no_border ? 0 : config.borderpx;
 	}
 
-	/* return if fullscreen */
-	if (!c->isfloating) {
+	if (c->isnamedscratchpad && c->mon) {
+		client_recalculate_floating_geom(c, c->mon);
+		resize(c, c->float_geom, (ResizeOpts){.interact = 0});
+	} else if (!c->isfloating) {
 		client_set_floating(c, 1);
 		c->geom.width = c->iscustomsize
 							? c->float_geom.width
@@ -3674,8 +3784,11 @@ bool switch_scratchpad_client_state(Client *c) {
 	if (!c || !c->mon)
 		return false;
 
-	if (config.scratchpad_cross_monitor && server.selected_monitor &&
-		c->mon != server.selected_monitor && c->is_in_scratchpad) {
+	/* A named scratchpad is a singleton: it always follows the focused monitor,
+	 * whatever scratchpad_cross_monitor says. */
+	if ((config.scratchpad_cross_monitor || c->isnamedscratchpad) &&
+		server.selected_monitor && c->mon != server.selected_monitor &&
+		c->is_in_scratchpad) {
 		// Saves the original monitor for size computation.
 		Monitor *oldmon = c->mon;
 		c->scratchpad_switching_mon = true;
@@ -3683,13 +3796,9 @@ bool switch_scratchpad_client_state(Client *c) {
 		reset_foreign_tolevel(c, oldmon, c->mon);
 		client_update_oldmonname_record(c, server.selected_monitor);
 
-		// Adjusts the window size for the new monitor.
-		c->float_geom.width =
-			(int32_t)(c->float_geom.width * c->mon->w.width / oldmon->w.width);
-		c->float_geom.height = (int32_t)(c->float_geom.height *
-										 c->mon->w.height / oldmon->w.height);
-
-		c->float_geom = client_center_geometry(c, c->mon, c->float_geom, 0, 0);
+		// Sizes the window for the new monitor from its rules or the scratchpad
+		// ratios, instead of scaling the old size.
+		client_recalculate_floating_geom(c, server.selected_monitor);
 
 		// Only a visible scratchpad needs focus and returns true.
 		if (SCRATCHPAD_SHOWN(c)) {
@@ -4262,7 +4371,8 @@ void client_add_jump_label_node(Client *c) {
 uint32_t client_target_layer(Client *c) {
 	bool special_overlay = (c->tags & TAG0_MASK);
 
-	if (c->isoverlay)
+	/* a pinned (global) floating window stays above everything else */
+	if (c->isoverlay || (c->isglobal && c->isfloating))
 		return special_overlay ? LyrSpecialOverlay : LyrOverlay;
 
 	if (config.float_full_to_top) {

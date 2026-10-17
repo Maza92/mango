@@ -1669,12 +1669,22 @@ int32_t toggle_named_scratchpad(const Arg *arg) {
 	target_client = get_client_by_id_or_title(arg_id, arg_title);
 
 	if (!target_client && arg->v3) {
+		/* The client that maps next claims this mark (see client_apply_rules) */
+		free(server.pending_scratchpad_mark);
+		server.pending_scratchpad_mark = strdup(arg_id);
+		server.pending_scratchpad_is_tag_bound = (arg->i == -1) ? 0 : arg->i;
 		Arg arg_spawn = {.v = arg->v3};
 		spawn_shell(&arg_spawn);
 		return 0;
 	}
 
+	if (!target_client)
+		return 0;
+
 	target_client->isnamedscratchpad = 1;
+	if (arg->i != -1) {
+		target_client->is_tag_bound = arg->i;
+	}
 	apply_named_scratchpad(target_client);
 	return 0;
 }
@@ -1854,6 +1864,62 @@ int32_t toggle_global(const Arg *arg) {
 	}
 	c->isglobal ^= 1;
 	client_update_border_color(c);
+	return 0;
+}
+
+/* Pin the window as a picture-in-picture: global, floating, translucent, in the
+ * bottom-right corner of the monitor. Toggling again restores it as a tile. */
+int32_t toggle_pinned(const Arg *arg) {
+	if (!server.selected_monitor)
+		return 0;
+
+	Client *c = arg->tc ? arg->tc : server.selected_monitor->sel;
+	if (!c || !c->mon || c->isfullscreen)
+		return 0;
+
+	if (c->is_in_scratchpad) {
+		c->is_in_scratchpad = 0;
+		c->isnamedscratchpad = 0;
+	}
+	c->isglobal ^= 1;
+
+	if (c->isglobal) {
+		c->animation.tagouting = false;
+		c->animation.tagouted = false;
+		c->animation.tagining = false;
+		if (c->scene)
+			wlr_scene_node_set_enabled(&c->scene->node, true);
+
+		client_set_floating(c, 1);
+		c->focused_opacity = 0.7f;
+		c->unfocused_opacity = 0.7f;
+		c->opacity_animation.target_opacity = 0.7f;
+
+		int32_t gap_oh = server.enable_gaps ? c->mon->gappoh : 0;
+		int32_t gap_ov = server.enable_gaps ? c->mon->gappov : 0;
+
+		/* 30% of the usable area, in the bottom-right corner */
+		int32_t pip_w = c->mon->w.width * 0.30;
+		int32_t pip_h = c->mon->w.height * 0.30;
+		struct wlr_box pip_geom = {
+			.x = c->mon->w.x + c->mon->w.width - pip_w - gap_oh,
+			.y = c->mon->w.y + c->mon->w.height - pip_h - gap_ov,
+			.width = pip_w,
+			.height = pip_h,
+		};
+		c->float_geom = pip_geom;
+		client_reparent_group(c);
+		resize(c, pip_geom, (ResizeOpts){.interact = 0});
+	} else {
+		c->focused_opacity = config.focused_opacity;
+		c->unfocused_opacity = config.unfocused_opacity;
+		c->opacity_animation.target_opacity = config.focused_opacity;
+		client_set_floating(c, 0);
+		client_reparent_group(c);
+	}
+
+	client_update_border_color(c);
+	arrange(server.selected_monitor, false, false);
 	return 0;
 }
 

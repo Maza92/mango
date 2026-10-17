@@ -26,6 +26,10 @@ static void usage(void) {
 		   "details\n");
 	printf("  get client <id>                          Show client details by "
 		   "ID\n");
+	printf("  get client_by_mark <mark>                Show client details by "
+		   "mark\n");
+	printf("  mark_client <id> <mark>                  Set a client mark "
+		   "('none' clears it)\n");
 	printf("  get tag <monitor> <index>                Show tag details "
 		   "(1‑based index)\n");
 	printf("  get all-clients                          List all clients\n");

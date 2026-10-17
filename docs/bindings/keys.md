@@ -106,12 +106,13 @@ bindr=Super,Super_L,spawn,rofi -show run
 | `togglefakefullscreen` | - | Toggle "fake" fullscreen (remains constrained). |
 | `togglemaximizescreen` | - | Maximize window (keep decoration/bar). |
 | `toggleglobal` | - | Pin window to all tags. |
+| `togglepinned` | - | Picture-in-picture: make the window global and floating, 30% of the usable area in the bottom-right corner, 70% opaque, above every other window. Toggle again to restore it as a tile. |
 | `toggle_render_border` | - | Toggle border rendering. |
 | `centerwin` | - | Center the floating window. |
 | `minimized` | - | Minimize window to scratchpad. |
 | `restore_minimized` | - | Restore minimized window to the currently focused tag. |
 | `toggle_scratchpad` | - | Toggle scratchpad. |
-| `toggle_named_scratchpad` | `app_id,title,cmd` | Toggle named scratchpad. Launches app if not running, otherwise shows/hides it. |
+| `toggle_named_scratchpad` | `app_id,title,cmd[,tag_bound]` | Toggle named scratchpad. Launches app if not running, otherwise shows/hides it. Pass a mark instead of `app_id` to find it by mark. |
 | `toggle_special_tag` | - | Toggle special workspace overlay (tiling scratchpad). |
 | `tag_special_tag` | - | Move focused window to/from the special workspace overlay. |
 | `tag_special_silent` | - | Silently move focused window to/from the special workspace overlay. |

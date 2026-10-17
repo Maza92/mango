@@ -552,6 +552,8 @@ FuncType parse_func_name(char *func_name, Arg *arg, char *arg_value,
 		(*arg).i = parse_circle_direction(arg_value);
 	} else if (strcmp(func_name, "toggleglobal") == 0) {
 		func = toggle_global;
+	} else if (strcmp(func_name, "togglepinned") == 0) {
+		func = toggle_pinned;
 	} else if (strcmp(func_name, "togglehdr") == 0) {
 		/* togglehdr[,on|off|toggle][,<monitor name>|all] */
 		func = toggle_hdr;
@@ -822,6 +824,11 @@ FuncType parse_func_name(char *func_name, Arg *arg, char *arg_value,
 		(*arg).v = strdup(arg_value);
 		(*arg).v2 = strdup(arg_value2);
 		(*arg).v3 = strdup(arg_value3);
+		/* optional 4th value: bind the scratchpad to its tag (-1 = unset) */
+		(*arg).i = -1;
+		if (arg_value4 && strlen(arg_value4) > 0) {
+			(*arg).i = atoi(arg_value4);
+		}
 	} else if (strcmp(func_name, "toggle_special_tag") == 0) {
 		func = toggle_special_tag;
 	} else if (strcmp(func_name, "tag_special_tag") == 0) {

@@ -60,6 +60,26 @@ bind=alt,h,toggle_named_scratchpad,st-yazi,none,st -c st-yazi -e yazi
 bind=alt,k,toggle_named_scratchpad,none,kitty-scratch,kitty -T kitty-scratch
 ```
 
+A named scratchpad is a **singleton**: it is looked up on every monitor and, when toggled, moves to the focused monitor and is resized from its window rule (or from `scratchpad_width_ratio` / `scratchpad_height_ratio` when no rule sets a size).
+
+## Marks
+
+A mark is a name carried by one client. Use it in place of `app_id` to find a scratchpad regardless of its title or app id:
+
+```ini
+# Spawn kitty; the client that maps next becomes the scratchpad named "notes"
+bind=alt,n,toggle_named_scratchpad,notes,none,kitty
+# A rule can use the mark too
+window_rule=mark:notes,width:900,height:600
+```
+
+Marks can also be set and read over IPC:
+
+```bash
+mmsg mark_client <client id> <mark>   # "none" clears it
+mmsg get client_by_mark <mark>
+```
+
 ---
 
 ## Appearance

@@ -165,6 +165,8 @@ struct Client {
 	int32_t istagsilent;
 	int32_t iskilling;
 	int32_t isnamedscratchpad;
+	int32_t is_tag_bound;
+	char *mark;
 	int32_t shield_when_capture;
 	bool is_pending_open_animation;
 	bool is_restoring_from_ov;
@@ -257,7 +259,7 @@ void client_unpark(Client *c, Client *anchor);
 bool client_is_parked(Client *c);
 void apply_rule_properties(Client *c, const ConfigWinRule *r);
 bool is_window_rule_matches(const ConfigWinRule *r, const char *appid,
-							const char *title);
+							const char *title, const char *mark);
 void client_swap_layout_properties(Client *c1, Client *c2);
 void client_swap_monitors_and_tags(Client *c1, Client *c2);
 void finish_exchange_arrange_and_focus(Client *c1, Client *c2, Monitor *m1,
@@ -340,7 +342,7 @@ client_center_geometry(Client *c, Monitor *tm, struct wlr_box geom,
 					   int32_t offsetx, int32_t offsety);
 /* Helper: Check if rule matches client */
 bool is_window_rule_matches(const ConfigWinRule *r, const char *appid,
-							const char *title);
+							const char *title, const char *mark);
 Client *center_tiled_select(Monitor *m);
 Client *find_client_by_direction(Client *tc, const Arg *arg, bool findfloating);
 Client *direction_select(const Arg *arg);
@@ -421,6 +423,7 @@ void client_pending_minimized_state(Client *c, int32_t isminimized);
 void show_scratchpad(Client *c);
 bool switch_scratchpad_client_state(Client *c);
 void apply_named_scratchpad(Client *target_client);
+void client_recalculate_floating_geom(Client *c, Monitor *target_mon);
 void client_update_border_color(Client *c);
 void client_add_dim_node(Client *c);
 void client_exchange(Client *c1, Client *c2);

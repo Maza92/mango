@@ -182,6 +182,10 @@ struct MangoServer {
 	uint32_t tagmask; /* default 9 tags; updated with config.tag_num */
 	uint32_t next_client_id;
 
+	/* mark and tag binding handed to the client spawned by a named scratchpad */
+	char *pending_scratchpad_mark;
+	int32_t pending_scratchpad_is_tag_bound;
+
 	/* Session lock state */
 	int32_t session_locked;
 	uint32_t locked_modifiers;

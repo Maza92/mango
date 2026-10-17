@@ -109,6 +109,7 @@ typedef struct {
 typedef struct {
 	const char *id;
 	const char *title;
+	const char *mark;
 	int32_t is_once;
 	int32_t is_once_applied;
 	uint32_t tags;

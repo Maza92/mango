@@ -1215,6 +1215,7 @@ void fadeout_client_animation_next_tick(Client *c) {
 	if (animation_passed >= 1.0) {
 		wl_list_remove(&c->fadeout_link);
 		wlr_scene_node_destroy(&c->scene->node);
+		free(c->mark);
 		free(c);
 	}
 }

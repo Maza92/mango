@@ -110,6 +110,7 @@ int32_t toggle_overlay(const Arg *arg);
 int32_t move_window(const Arg *arg);
 int32_t resize_window(const Arg *arg);
 int32_t toggle_named_scratchpad(const Arg *arg);
+int32_t toggle_pinned(const Arg *arg);
 int32_t toggle_render_border(const Arg *arg);
 int32_t create_virtual_output(const Arg *arg);
 int32_t destroy_all_virtual_output(const Arg *arg);

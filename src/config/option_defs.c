@@ -1392,6 +1392,7 @@ bool parse_option(Config *config, char *key, char *value, int line_number) {
 		rule->monitor = NULL;
 		rule->id = NULL;
 		rule->title = NULL;
+		rule->mark = NULL;
 
 		rule->globalkeybinding = (KeyBinding){0};
 
@@ -1411,6 +1412,8 @@ bool parse_option(Config *config, char *key, char *value, int line_number) {
 					rule->isfloating = atoi(val);
 				} else if (strcmp(key, "title") == 0) {
 					rule->title = strdup(val);
+				} else if (strcmp(key, "mark") == 0) {
+					rule->mark = strdup(val);
 				} else if (strcmp(key, "app_id") == 0) {
 					rule->id = strdup(val);
 				} else if (strcmp(key, "animation_type_open") == 0) {

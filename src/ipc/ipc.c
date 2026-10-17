@@ -584,6 +584,7 @@ cJSON *build_client_json(Client *c) {
 							c->ext_foreign_toplevel->identifier);
 	cJSON_AddStringToObject(obj, "title", client_get_title(c));
 	cJSON_AddStringToObject(obj, "appid", client_get_appid(c));
+	cJSON_AddStringToObject(obj, "mark", c->mark ? c->mark : "");
 	cJSON_AddStringToObject(obj, "monitor", client_output_name(c));
 	cJSON_AddItemToObject(obj, "tags", tags_mask_to_array(c->tags));
 	cJSON_AddBoolToObject(obj, "is_xwayland", c->type == X11 ? true : false);
@@ -715,6 +716,26 @@ void handle_command(int client_fd, const char *cmd_raw) {
 			send_static_json(client_fd, "{\"error\":\"no focused client\"}\n");
 			return;
 		}
+	} else if (strncmp(cmd, "get client_by_mark ", 19) == 0) {
+		char mark_name[256] = "";
+		if (sscanf(cmd + 19, "%255s", mark_name) != 1) {
+			send_static_json(
+				client_fd, "{\"error\":\"usage: get client_by_mark <mark>\"}\n");
+			return;
+		}
+		Client *target = NULL;
+		Client *c = NULL;
+		wl_list_for_each(c, &server.clients, link) {
+			if (c->mark && strcmp(c->mark, mark_name) == 0) {
+				target = c;
+				break;
+			}
+		}
+		if (!target) {
+			send_static_json(client_fd, "{\"error\":\"client not found\"}\n");
+			return;
+		}
+		resp = build_client_json(target);
 	} else if (strncmp(cmd, "get client ", 11) == 0) {
 		Client *c = client_by_id_all((uint32_t)atoi(cmd + 11));
 		if (!c) {
@@ -876,6 +897,25 @@ void handle_command(int client_fd, const char *cmd_raw) {
 		resp = build_monitor_tags_response(m);
 	} else if (strcmp(cmd, "get layouts") == 0) {
 		resp = build_layouts_response();
+	} else if (strncmp(cmd, "mark_client ", 12) == 0) {
+		uint32_t client_id = 0;
+		char mark_name[256] = "";
+		if (sscanf(cmd + 12, "%u %255s", &client_id, mark_name) != 2) {
+			send_static_json(
+				client_fd, "{\"error\":\"usage: mark_client <id> <mark>\"}\n");
+			return;
+		}
+		Client *c = client_by_id_all(client_id);
+		if (!c) {
+			send_static_json(client_fd, "{\"error\":\"client not found\"}\n");
+			return;
+		}
+		free(c->mark);
+		/* "none" clears the mark */
+		c->mark = strcmp(mark_name, "none") == 0 ? NULL : strdup(mark_name);
+
+		resp = cJSON_CreateObject();
+		cJSON_AddBoolToObject(resp, "success", true);
 	} else if (strncmp(cmd, "dispatch ", 9) == 0) {
 		char *dispatch_copy = strdup(cmd_raw + 9);
 		char *out = dispatch_copy, *ptr = dispatch_copy;
