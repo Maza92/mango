@@ -201,6 +201,8 @@ enum {
 	LyrTop,
 	LyrFadeOut,
 	LyrOverlay,
+	// zwlr_layer_shell overlay surfaces, above overlay clients such as scratchpads
+	LyrLayerOverlay,
 	LyrIMPopup, // text-input layer
 	LyrBlock,
 	NUM_LAYERS
@@ -1062,7 +1064,8 @@ static struct wlr_scene_rect *root_bg;
 static struct wlr_session_lock_manager_v1 *session_lock_mgr;
 static struct wlr_scene_rect *locked_bg;
 static struct wlr_session_lock_v1 *cur_lock;
-static const int32_t layermap[] = {LyrBg, LyrBottom, LyrTop, LyrOverlay};
+static const int32_t layermap[] = {LyrBg, LyrBottom, LyrTop,
+								 LyrLayerOverlay};
 static struct wlr_scene_tree *drag_icon;
 static struct wlr_cursor_shape_manager_v1 *cursor_shape_mgr;
 static struct wlr_pointer_constraints_v1 *pointer_constraints;
