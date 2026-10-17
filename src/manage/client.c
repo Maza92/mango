@@ -15,6 +15,7 @@
 #include "mango/layout/dwindle.h"
 #include "mango/layout/layout.h"
 #include "mango/layout/scroll.h"
+#include "mango/manage/dyn_tags.h"
 #include "mango/manage/layer.h"
 #include "mango/manage/misc.h"
 #include "mango/manage/monitor.h"
@@ -1573,6 +1574,11 @@ void set_float_malposition(Client *tc) {
 }
 
 void client_reset_mon_tags(Client *c, Monitor *mon, uint32_t newtags) {
+	/* a hidden scratchpad has no tags and must stay hidden */
+	if (c->isminimized) {
+		c->tags = 0;
+		return;
+	}
 	if (!newtags && mon && !mon->isoverview) {
 		c->tags = mon->tagset[mon->seltags];
 	} else if (!newtags && mon && mon->isoverview) {
@@ -3273,6 +3279,9 @@ void client_set_monitor(Client *c, Monitor *m, uint32_t newtags, bool focus) {
 		reset_foreign_tolevel(c, oldmon, m);
 		resize(c, c->geom, (ResizeOpts){.interact = 0});
 		client_reset_mon_tags(c, m, newtags);
+		/* the tags the client lands on exist on this monitor */
+		if (!c->is_in_scratchpad && !c->isminimized && c->tags)
+			m->active_tags_mask |= c->tags & TAGMASK;
 		check_match_tag_floating_rule(c, m);
 		client_set_floating(c, c->isfloating);
 		client_apply_fullscreen(c, c->isfullscreen,
@@ -3295,18 +3304,23 @@ void client_change_mon(Client *c, Monitor *m) {
 void view_insert_shift_tags(Monitor *m, uint32_t target) {
 	Client *c;
 	uint32_t map[tag_num_MAX + 1] = {0};
-	uint32_t i;
+	uint32_t i, last;
 
-	if (!m || target < 1 || target >= (uint32_t)config.tag_num)
+	if (!m)
 		return;
 
-	if (get_tag_status((uint32_t)config.tag_num, m))
+	/* the tags above the last active one do not exist: shift within those */
+	last = monitor_last_active_tag(m);
+	if (target < 1 || target >= last)
 		return;
 
-	for (i = 1; i <= (uint32_t)config.tag_num; i++) {
+	if (get_tag_status(last, m))
+		return;
+
+	for (i = 1; i <= last; i++) {
 		if (i < target)
 			map[i] = i;
-		else if (i < (uint32_t)config.tag_num)
+		else if (i < last)
 			map[i] = i + 1;
 		else
 			map[i] = i;
@@ -3329,7 +3343,7 @@ void view_insert_shift_tags(Monitor *m, uint32_t target) {
 		map[m->pertag->prevtag])
 		m->pertag->prevtag = map[m->pertag->prevtag];
 
-	for (i = (uint32_t)config.tag_num - 1; i >= target; i--) {
+	for (i = last - 1; i >= target; i--) {
 		tag_gather_move_pertag(m, i + 1, i);
 	}
 }

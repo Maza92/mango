@@ -535,10 +535,27 @@ void reset_tag(int old_tag_num) {
 	}
 }
 
+/* The tags that exist on a monitor follow the config: the initial ones always
+ * do, the dynamic ones stay while they are within tag_num. */
+void reset_active_tags(void) {
+	Monitor *m = NULL;
+	uint32_t initial_mask = (1u << config.initial_tags_count) - 1;
+
+	wl_list_for_each(m, &server.monitors, link) {
+		m->active_tags_mask =
+			((m->active_tags_mask & server.tagmask) | initial_mask);
+		m->tags_had_clients_mask &= m->active_tags_mask;
+		m->tags_pending_spawn_mask &= m->active_tags_mask;
+		if (m->wlr_output->enabled)
+			sync_workspaces_to_tag_num(m);
+	}
+}
+
 int32_t reload_config(const Arg *arg) {
 	int old_tag_num = config.tag_num;
 	parse_config();
 	reset_tag(old_tag_num);
+	reset_active_tags();
 	reset_option();
 	update_seat_capabilities();
 	apply_primary_selection();

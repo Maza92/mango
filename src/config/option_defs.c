@@ -453,6 +453,12 @@ bool parse_option(Config *config, char *key, char *value, int line_number) {
 		config->default_nmaster = atoi(value);
 	} else if (strcmp(key, "tag_num") == 0) {
 		config->tag_num = atoi(value);
+		config->tag_num_set = true;
+	} else if (strcmp(key, "initial_tags_count") == 0) {
+		config->initial_tags_count = atoi(value);
+		config->initial_tags_count_set = true;
+	} else if (strcmp(key, "auto_remove_empty_tags") == 0) {
+		config->auto_remove_empty_tags = atoi(value);
 	} else if (strcmp(key, "tag_gather") == 0) {
 		config->tag_gather = atoi(value);
 	} else if (strcmp(key, "center_master_overspread") == 0) {
@@ -2307,7 +2313,13 @@ void set_value_default() {
 	config.new_is_master = 1;
 	config.default_mfact = 0.55f;
 	config.default_nmaster = 1;
-	config.tag_num = 9;
+	/* All tag slots exist; only the first initial_tags_count are active, the
+	 * rest are opened on demand with add_tag. */
+	config.tag_num = tag_num_MAX;
+	config.initial_tags_count = 9;
+	config.auto_remove_empty_tags = 0;
+	config.tag_num_set = false;
+	config.initial_tags_count_set = false;
 	config.tag_gather = 0;
 	config.center_master_overspread = 0;
 	config.center_when_single_stack = 1;
@@ -2671,6 +2683,13 @@ void override_config(void) {
 	config.default_mfact = CLAMP_FLOAT(config.default_mfact, 0.1f, 0.9f);
 	config.default_nmaster = CLAMP_INT(config.default_nmaster, 1, 1000);
 	config.tag_num = CLAMP_INT(config.tag_num, 1, tag_num_MAX);
+	/* An explicit tag_num alone keeps its old meaning: every tag is active */
+	if (config.tag_num_set && !config.initial_tags_count_set)
+		config.initial_tags_count = config.tag_num;
+	config.initial_tags_count =
+		CLAMP_INT(config.initial_tags_count, 1, config.tag_num);
+	config.auto_remove_empty_tags =
+		CLAMP_INT(config.auto_remove_empty_tags, 0, 1);
 	config.tag_gather = CLAMP_INT(config.tag_gather, 0, 1);
 	config.center_master_overspread =
 		CLAMP_INT(config.center_master_overspread, 0, 1);

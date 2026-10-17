@@ -18,6 +18,7 @@
 #include "mango/layout/layout.h"
 #include "mango/layout/scroll.h"
 #include "mango/manage/client.h"
+#include "mango/manage/dyn_tags.h"
 #include "mango/manage/layer.h"
 #include "mango/manage/misc.h"
 #include "mango/manage/xwayland_primary.h"
@@ -816,6 +817,12 @@ void handle_new_output(struct wl_listener *listener, void *data) {
 		m->pertag->curtag = m->pertag->prevtag = 1;
 	}
 
+	m->active_tags_mask = (1u << config.initial_tags_count) - 1;
+	m->tags_had_clients_mask = 0;
+	m->tags_pending_spawn_mask = 0;
+	/* a view restored by chvt can sit on a dynamic tag */
+	m->active_tags_mask |= m->tagset[0] & TAGMASK;
+
 	for (i = 0; i <= config.tag_num; i++) {
 		m->pertag->nmasters[i] = config.default_nmaster;
 		m->pertag->mfacts[i] = config.default_mfact;
@@ -843,7 +850,8 @@ void handle_new_output(struct wl_listener *listener, void *data) {
 	wlr_ext_workspace_group_handle_v1_output_enter(m->ext_group, m->wlr_output);
 
 	for (i = 1; i <= config.tag_num; i++) {
-		add_workspace_by_tag(i, m);
+		if (m->active_tags_mask & (1u << (i - 1)))
+			add_workspace_by_tag(i, m);
 	}
 
 	handle_output_layout_change(NULL, NULL);
@@ -919,6 +927,10 @@ void monitor_close(Monitor *m) {
 	 * move closed monitor's clients to the focused one */
 	Client *c = NULL;
 	int32_t nmons = wl_list_length(&server.monitors);
+	uint32_t tag_mapping[tag_num_MAX] = {0};
+
+	/* clients change monitor below: do not drop empty dynamic tags meanwhile */
+	server.is_migration_active = true;
 
 	if (server.gesture_drive_mon == m) {
 		server.gesture_drive_active = false;
@@ -946,6 +958,7 @@ void monitor_close(Monitor *m) {
 
 	wl_list_for_each(c, &server.clients, link) {
 		if (c->mon == m) {
+			c->oldmon_tags = c->tags;
 
 			if (server.selected_monitor == NULL) {
 				if (c->foreign_toplevel) {
@@ -957,6 +970,28 @@ void monitor_close(Monitor *m) {
 
 				client_set_group_mon(c, NULL);
 			} else {
+				/* dynamic tags that clash on the new monitor move to free
+				 * ones; a hidden scratchpad keeps its tag in oldtags */
+				bool hidden = c->is_in_scratchpad && c->isminimized;
+				uint32_t newtags = dyn_tag_remap_to_monitor(
+					c, server.selected_monitor, tag_mapping);
+
+				if (newtags != 0) {
+					if (hidden) {
+						c->oldtags = newtags;
+						client_recalculate_floating_geom(c,
+														 server.selected_monitor);
+					} else {
+						c->tags = newtags;
+						if (SCRATCHPAD_SHOWN(c)) {
+							client_recalculate_floating_geom(
+								c, server.selected_monitor);
+							resize(c, c->float_geom,
+								   (ResizeOpts){.interact = 0});
+						}
+					}
+				}
+
 				client_set_group_mon(c, server.selected_monitor);
 			}
 			// record the oldmonname which is used to restore
@@ -969,6 +1004,8 @@ void monitor_close(Monitor *m) {
 		client_focus(client_focus_top(server.selected_monitor), 1);
 		printstatus(IPC_WATCH_ARRANGGE);
 	}
+
+	server.is_migration_active = false;
 }
 
 void handle_output_request_state(struct wl_listener *listener, void *data) {
@@ -1114,7 +1151,27 @@ void handle_output_layout_change(struct wl_listener *listener, void *data) {
 			// restore window to old monitor
 			if (c->mon && c->mon != m && client_surface(c)->mapped &&
 				strcmp(c->oldmonname, m->wlr_output->name) == 0) {
-				client_change_mon(c, m);
+				/* a client that sat on a dynamic tag stays where its tag was
+				 * remapped to; the others go back with their old tags */
+				uint32_t original_tags = c->oldmon_tags ? c->oldmon_tags
+														: c->tags;
+				bool is_dynamic = false;
+				int32_t bit;
+
+				for (bit = config.initial_tags_count; bit < config.tag_num;
+					 bit++) {
+					if (original_tags & (1u << bit)) {
+						is_dynamic = true;
+						break;
+					}
+				}
+				if (!is_dynamic) {
+					if (c->oldmon_tags) {
+						c->tags = c->oldmon_tags;
+						c->oldmon_tags = 0;
+					}
+					client_change_mon(c, m);
+				}
 			}
 		}
 

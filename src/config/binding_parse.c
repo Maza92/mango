@@ -554,6 +554,13 @@ FuncType parse_func_name(char *func_name, Arg *arg, char *arg_value,
 		func = toggle_global;
 	} else if (strcmp(func_name, "togglepinned") == 0) {
 		func = toggle_pinned;
+	} else if (strcmp(func_name, "add_tag") == 0) {
+		func = add_tag;
+		if (arg_value && arg_value[0] != '\0')
+			(*arg).v = strdup(arg_value);
+	} else if (strcmp(func_name, "remove_tag") == 0) {
+		func = remove_tag;
+		(*arg).i = arg_value && arg_value[0] != '\0' ? atoi(arg_value) : 0;
 	} else if (strcmp(func_name, "togglehdr") == 0) {
 		/* togglehdr[,on|off|toggle][,<monitor name>|all] */
 		func = toggle_hdr;

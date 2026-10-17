@@ -41,7 +41,9 @@ description: Advanced settings for XWayland, focus behavior, and system integrat
 | `view_current_to_back` | `0` | Toggling the current tag switches back to the previously viewed tag. |
 | `scratchpad_cross_monitor` | `0` | Share the scratchpad pool across all monitors. |
 | `single_scratchpad` | `1` | Only allow one scratchpad (named or standard) to be visible at a time. |
-| `tag_num` | `9` | Number of tags/workspaces (1–31). On config reload, clients on tags beyond this count are moved to the last tag. |
+| `tag_num` | `31` | Number of tag slots (1–31). Only the first `initial_tags_count` are active; the rest are dynamic tags opened with `add_tag`. Setting `tag_num` without `initial_tags_count` makes every tag active. On config reload, clients on tags beyond this count are moved to the last tag. |
+| `initial_tags_count` | `9` | Tags that exist from the start on every monitor (1–`tag_num`). The tags above it are dynamic: opened with `add_tag`, closed with `remove_tag` or automatically. |
+| `auto_remove_empty_tags` | `0` | When `1`, a dynamic tag is closed as soon as it has no client left (it is kept while it is being viewed and never held one, and for 30 s after `add_tag` with a command). Scratchpads bound to the tag are closed with it. |
 | `tag_gather` | `0` | When `1`, occupied tags are compacted to consecutive tags starting at 1, eliminating gaps. For example, with windows on tags 1, 3 and 9, they move to 1, 2 and 3, and the current view follows. |
 
 ## Window Behavior

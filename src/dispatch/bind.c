@@ -17,6 +17,7 @@
 #include "mango/layout/overview.h"
 #include "mango/layout/scroll.h"
 #include "mango/manage/client.h"
+#include "mango/manage/dyn_tags.h"
 #include "mango/manage/misc.h"
 #include "mango/manage/monitor.h"
 #include "mango/manage/tab.h"
@@ -40,6 +41,10 @@ int32_t bind_to_view(const Arg *arg) {
 	if (!server.selected_monitor)
 		return 0;
 	uint32_t target = arg->ui;
+
+	/* a tag that is not active on this monitor cannot be viewed */
+	if (!monitor_tags_allowed(server.selected_monitor, target))
+		return 0;
 
 	if (config.view_current_to_back &&
 		server.selected_monitor->pertag->curtag &&
@@ -1501,6 +1506,8 @@ int32_t tag(const Arg *arg) {
 	if (!server.selected_monitor)
 		return 0;
 	Client *target_client = arg->tc ? arg->tc : server.selected_monitor->sel;
+	if (!monitor_tags_allowed(server.selected_monitor, arg->ui))
+		return 0;
 	tag_client(arg, target_client);
 	return 0;
 }
@@ -1590,6 +1597,9 @@ int32_t tag_silent(const Arg *arg) {
 	if (!target_client)
 		return 0;
 
+	if (!monitor_tags_allowed(target_client->mon, arg->ui))
+		return 0;
+
 	target_client->tags =
 		(arg->ui & TAG0_MASK) ? TAG0_MASK : (arg->ui & TAGMASK);
 	client_reparent_group(target_client);
@@ -1604,59 +1614,72 @@ int32_t tag_silent(const Arg *arg) {
 	return 0;
 }
 
-int32_t tag_to_left(const Arg *arg) {
-	if (!server.selected_monitor)
+/* Move the selected client to the nearest active tag in direction dir
+ * (-1 left, 1 right), wrapping around with tag_carousel. */
+static int32_t tag_shift(const Arg *arg, int32_t dir) {
+	Monitor *m = server.selected_monitor;
+	Client *sel;
+	uint32_t current;
+	int32_t n;
+	bool found = false;
+
+	if (!m)
 		return 0;
 
-	Client *sel = arg->tc ? arg->tc : server.selected_monitor->sel;
-	if (sel != NULL &&
-		__builtin_popcount(
-			server.selected_monitor->tagset[server.selected_monitor->seltags] &
-			TAGMASK) == 1) {
-		uint32_t target =
-			server.selected_monitor->tagset[server.selected_monitor->seltags] >>
-			1;
+	sel = arg->tc ? arg->tc : m->sel;
+	if (sel == NULL || __builtin_popcount(m->tagset[m->seltags] & TAGMASK) != 1)
+		return 0;
 
-		if (target == 0) {
-			if (!config.tag_carousel)
-				return 0;
-			target = (1 << (config.tag_num - 1)) & TAGMASK;
-			server.selected_monitor->carousel_anim_dir = -1;
+	current = get_tags_first_tag_num(m->tagset[m->seltags]);
+
+	if (dir < 0) {
+		for (n = (int32_t)current - 1; n >= 1; n--) {
+			if (monitor_tag_active(m, n)) {
+				found = true;
+				break;
+			}
 		}
-
-		Arg a = {.ui = target & TAGMASK, .i = arg->i, .tc = sel};
-		tag(&a);
-		server.selected_monitor->carousel_anim_dir = 0;
+		if (!found && config.tag_carousel) {
+			for (n = config.tag_num; n > (int32_t)current; n--) {
+				if (monitor_tag_active(m, n)) {
+					found = true;
+					break;
+				}
+			}
+		}
+	} else {
+		for (n = (int32_t)current + 1; n <= config.tag_num; n++) {
+			if (monitor_tag_active(m, n)) {
+				found = true;
+				break;
+			}
+		}
+		if (!found && config.tag_carousel) {
+			for (n = 1; n < (int32_t)current; n++) {
+				if (monitor_tag_active(m, n)) {
+					found = true;
+					break;
+				}
+			}
+		}
 	}
+
+	if (!found)
+		return 0;
+
+	/* wrapped around: animate in the carousel direction */
+	if ((dir < 0 && n > (int32_t)current) || (dir > 0 && n < (int32_t)current))
+		m->carousel_anim_dir = dir < 0 ? -1 : 1;
+
+	Arg a = {.ui = (1u << (n - 1)) & TAGMASK, .i = arg->i, .tc = sel};
+	tag(&a);
+	m->carousel_anim_dir = 0;
 	return 0;
 }
 
-int32_t tag_to_right(const Arg *arg) {
-	if (!server.selected_monitor)
-		return 0;
+int32_t tag_to_left(const Arg *arg) { return tag_shift(arg, -1); }
 
-	Client *sel = arg->tc ? arg->tc : server.selected_monitor->sel;
-	if (sel != NULL &&
-		__builtin_popcount(
-			server.selected_monitor->tagset[server.selected_monitor->seltags] &
-			TAGMASK) == 1) {
-		uint32_t target =
-			server.selected_monitor->tagset[server.selected_monitor->seltags]
-			<< 1;
-
-		if (!(target & TAGMASK)) {
-			if (!config.tag_carousel)
-				return 0;
-			target = 1;
-			server.selected_monitor->carousel_anim_dir = 1;
-		}
-
-		Arg a = {.ui = target & TAGMASK, .i = arg->i, .tc = sel};
-		tag(&a);
-		server.selected_monitor->carousel_anim_dir = 0;
-	}
-	return 0;
-}
+int32_t tag_to_right(const Arg *arg) { return tag_shift(arg, 1); }
 
 int32_t toggle_named_scratchpad(const Arg *arg) {
 	Client *target_client = NULL;
@@ -1923,6 +1946,47 @@ int32_t toggle_pinned(const Arg *arg) {
 	return 0;
 }
 
+/* Open a new dynamic tag on the focused monitor, optionally named (arg->v). */
+int32_t add_tag(const Arg *arg) {
+	Monitor *m = server.selected_monitor;
+
+	if (!m)
+		return 0;
+
+	if (dyn_tag_create(m, arg->v, false) < 0)
+		return 0;
+
+	arrange(m, false, false);
+	printstatus(IPC_WATCH_ARRANGGE);
+	return 0;
+}
+
+/* Close a dynamic tag of the focused monitor: arg->i, or the highest one when
+ * unset. It is left alone while it still has clients. */
+int32_t remove_tag(const Arg *arg) {
+	Monitor *m = server.selected_monitor;
+	int32_t tag;
+
+	if (!m)
+		return 0;
+
+	tag = arg->i > 0 ? arg->i : dyn_tag_last_active(m);
+
+	if (tag <= config.initial_tags_count || tag > config.tag_num ||
+		!monitor_tag_active(m, tag))
+		return 0;
+
+	/* the last tag of a monitor stays */
+	if (monitor_active_tag_count(m) <= 1)
+		return 0;
+
+	if (dyn_tag_has_clients(m, 1u << (tag - 1)))
+		return 0;
+
+	dyn_tag_deactivate(m, tag);
+	return 0;
+}
+
 int32_t toggle_gaps(const Arg *arg) {
 	if (!server.selected_monitor)
 		return 0;
@@ -2075,7 +2139,9 @@ static uint32_t tag_gather_last_tag_num(Monitor *m) {
 	return last;
 }
 
-bool view_shift_tag(const Arg *arg, int dir) {
+/* tag_gather keeps its own stepping: tags are compacted, so it can step one
+ * past the last occupied tag. */
+static bool view_shift_tag_gather(const Arg *arg, int dir) {
 	Monitor *m = server.selected_monitor;
 	uint32_t cur, target, last;
 	bool wrapped = false;
@@ -2120,6 +2186,72 @@ bool view_shift_tag(const Arg *arg, int dir) {
 		m->carousel_anim_dir = dir < 0 ? -1 : 1;
 
 	client_switch_view(&(Arg){.ui = target, .i = arg->i}, true);
+	m->carousel_anim_dir = 0;
+	return true;
+}
+
+/* View the nearest tag in direction dir that is active on the monitor and has
+ * clients (an empty tag is only reached by number), wrapping with
+ * tag_carousel. */
+bool view_shift_tag(const Arg *arg, int dir) {
+	Monitor *m = server.selected_monitor;
+	uint32_t current, n = 0;
+	bool found = false;
+	bool wrapped = false;
+
+	if (config.tag_gather)
+		return view_shift_tag_gather(arg, dir);
+
+	if (!m)
+		return false;
+
+	if (m->isoverview || m->pertag->curtag == 0)
+		return false;
+
+	current = get_tags_first_tag_num(m->tagset[m->seltags]);
+
+	if (dir < 0) {
+		for (n = current - 1; n >= 1; n--) {
+			if (monitor_tag_active(m, n) && get_tag_status(n, m)) {
+				found = true;
+				break;
+			}
+		}
+		if (!found && config.tag_carousel) {
+			for (n = (uint32_t)config.tag_num; n > current; n--) {
+				if (monitor_tag_active(m, n) && get_tag_status(n, m)) {
+					found = true;
+					wrapped = true;
+					break;
+				}
+			}
+		}
+	} else {
+		for (n = current + 1; n <= (uint32_t)config.tag_num; n++) {
+			if (monitor_tag_active(m, n) && get_tag_status(n, m)) {
+				found = true;
+				break;
+			}
+		}
+		if (!found && config.tag_carousel) {
+			for (n = 1; n < current; n++) {
+				if (monitor_tag_active(m, n) && get_tag_status(n, m)) {
+					found = true;
+					wrapped = true;
+					break;
+				}
+			}
+		}
+	}
+
+	if (!found)
+		return false;
+
+	if (wrapped)
+		m->carousel_anim_dir = dir < 0 ? -1 : 1;
+
+	client_switch_view(&(Arg){.ui = (1u << (n - 1)) & TAGMASK, .i = arg->i},
+					   true);
 	m->carousel_anim_dir = 0;
 	return true;
 }
@@ -2196,7 +2328,7 @@ int32_t view_to_right(const Arg *arg) {
 }
 
 int32_t view_insert(const Arg *arg) {
-	uint32_t cur, curmask, target;
+	uint32_t cur, curmask, target, last;
 
 	if (!server.selected_monitor || server.selected_monitor->isoverview)
 		return 0;
@@ -2210,8 +2342,10 @@ int32_t view_insert(const Arg *arg) {
 	if (!cur)
 		return 0;
 
+	last = monitor_last_active_tag(server.selected_monitor);
+
 	if (arg->i == NEXT) {
-		if (cur >= (uint32_t)config.tag_num)
+		if (cur >= last)
 			return 0;
 		target = cur + 1;
 	} else if (cur == 1) {
@@ -2227,8 +2361,7 @@ int32_t view_insert(const Arg *arg) {
 		return 0;
 	}
 
-	if (target >= (uint32_t)config.tag_num ||
-		get_tag_status((uint32_t)config.tag_num, server.selected_monitor))
+	if (target >= last || get_tag_status(last, server.selected_monitor))
 		return 0;
 
 	view_insert_shift_tags(server.selected_monitor, target);

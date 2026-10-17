@@ -186,6 +186,10 @@ struct MangoServer {
 	char *pending_scratchpad_mark;
 	int32_t pending_scratchpad_is_tag_bound;
 
+	/* set while clients move between monitors, so empty dynamic tags are not
+	 * removed in the middle of the move */
+	bool is_migration_active;
+
 	/* Session lock state */
 	int32_t session_locked;
 	uint32_t locked_modifiers;

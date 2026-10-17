@@ -375,6 +375,11 @@ typedef struct {
 	float default_mfact;
 	uint32_t default_nmaster;
 	int32_t tag_num;	// Configurable tag count, range 1..tag_num_MAX.
+	// Tags active at start; the rest up to tag_num are dynamic (add_tag).
+	int32_t initial_tags_count;
+	int32_t auto_remove_empty_tags; // Drop empty dynamic tags automatically
+	bool tag_num_set;				// tag_num / initial_tags_count were given in
+	bool initial_tags_count_set;	// the config, not left at their defaults
 	int32_t tag_gather; // Compact tags to remove gaps
 	int32_t center_master_overspread;
 	int32_t center_when_single_stack;
@@ -716,6 +721,7 @@ void reapply_tagrule(void);
 void reset_option(void);
 
 void reset_tag(int old_tag_num);
+void reset_active_tags(void);
 
 int32_t reload_config(const Arg *arg);
 

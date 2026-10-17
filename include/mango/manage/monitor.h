@@ -78,6 +78,12 @@ struct Monitor {
 	struct wlr_ext_workspace_group_handle_v1 *ext_group;
 	bool iscleanuping;
 	int8_t carousel_anim_dir;
+	/* tags that exist on this monitor; tags beyond config.initial_tags_count
+	 * are dynamic: opened by add_tag, closed by remove_tag or auto-removal */
+	uint32_t active_tags_mask;
+	uint32_t tags_had_clients_mask;	   /* dynamic tags that held a client */
+	uint32_t tags_pending_spawn_mask;  /* dynamic tags waiting for a spawn */
+	uint64_t tag_spawn_time[tag_num_MAX]; /* ms, when the spawn was requested */
 	bool vrr_global_enable;
 	bool is_vrr_enabling;
 	bool hdr_enable;
@@ -108,6 +114,7 @@ struct Pertag {
 	const Layout *config_ltidxs[PERTAG_SLOTS];
 	const Layout *ltidxs[PERTAG_SLOTS];
 	struct TagScrollerState *scroller_state[PERTAG_SLOTS];
+	char tag_names[PERTAG_SLOTS][64]; /* optional name of a dynamic tag */
 };
 
 bool is_special_active(const Monitor *m);

@@ -9,10 +9,12 @@
 #include "mango/layout/scroll.h"
 #include "mango/layout/vertical.h"
 #include "mango/manage/client.h"
+#include "mango/manage/dyn_tags.h"
 #include "mango/manage/misc.h"
 #include "mango/manage/monitor.h"
 #include "mango/manage/tab.h"
 #include <assert.h>
+#include <string.h>
 #include <wlr/types/wlr_cursor.h>
 
 /* Minimum interval between drag layout updates: one per presented frame. */
@@ -1323,6 +1325,7 @@ void tag_gather_reset_slot(Monitor *m, uint32_t tag) {
 	m->pertag->open_as_floating[tag] = 0;
 	m->pertag->dwindle_root[tag] = NULL;
 	m->pertag->scroller_state[tag] = NULL;
+	m->pertag->tag_names[tag][0] = '\0';
 
 	for (i = 0; i < config.tag_rules_count; i++) {
 		const ConfigTagRule *tr = &config.tag_rules[i];
@@ -1351,6 +1354,8 @@ void tag_gather_move_pertag(Monitor *m, uint32_t dst, uint32_t src) {
 	m->pertag->config_ltidxs[dst] = m->pertag->config_ltidxs[src];
 	m->pertag->ltidxs[dst] = m->pertag->ltidxs[src];
 	m->pertag->scroller_state[dst] = m->pertag->scroller_state[src];
+	memcpy(m->pertag->tag_names[dst], m->pertag->tag_names[src],
+		   sizeof(m->pertag->tag_names[dst]));
 	tag_gather_reset_slot(m, src);
 }
 
@@ -1393,6 +1398,9 @@ void tag_gather_apply(Monitor *m) {
 			continue;
 		c->tags = tag_remap_mask(c->tags, map);
 	}
+
+	// the tags clients were compacted onto exist
+	m->active_tags_mask |= tag_remap_mask(occupied, map) & server.tagmask;
 
 	// remap current/previous views (and overview backups).
 	m->tagset[m->seltags] = tag_remap_mask(m->tagset[m->seltags], map);
@@ -1474,6 +1482,8 @@ void arrange(Monitor *m, bool want_animation, bool from_view) {
 
 	if (!m->wlr_output->enabled)
 		return;
+
+	cleanup_empty_dynamic_tags(m);
 
 	if (!m->sel) {
 		m->sel = client_focus_top(m);

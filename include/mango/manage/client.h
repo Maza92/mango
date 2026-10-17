@@ -195,6 +195,7 @@ struct Client {
 	float focused_opacity;
 	float unfocused_opacity;
 	char oldmonname[128];
+	uint32_t oldmon_tags; /* tags the client had on the monitor it left */
 	int32_t no_blur;
 	float blur_opacity;
 	struct wlr_ext_foreign_toplevel_handle_v1 *ext_foreign_toplevel;

@@ -145,6 +145,8 @@ bindr=Super,Super_L,spawn,rofi -show run
 | Command | Param | Description |
 | :--- | :--- | :--- |
 | `view` | `mask[,synctag]` | View tag(s). Accepts a [tag mask](/docs/bindings/keys#tag-mask-format). Additionally, `00` shows all tags, `-1` shows the previous tagset. Optional `synctag` (0/1) syncs the action to all monitors. |
+| `add_tag` | `[name]` | Open a new dynamic tag on the focused monitor, optionally named. |
+| `remove_tag` | `[index]` | Close a dynamic tag of the focused monitor (the highest one without `index`), unless it still has clients. |
 | `viewtoleft` | `[synctag]` | View previous tag. Optional `synctag` (0/1) syncs to all monitors. |
 | `viewtoright` | `[synctag]` | View next tag. Optional `synctag` (0/1) syncs to all monitors. |
 | `view_insert` | `prev`/`next` | View the adjacent tag if it is empty; otherwise insert an empty tag before/after the current one and switch to it. |

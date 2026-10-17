@@ -1,12 +1,16 @@
 #include "mango/ipc/ipc.h"
+#include "mango/animation/client.h"
 #include "mango/common/log.h"
 #include "mango/common/server.h"
 #include "mango/common/util.h"
+#include "mango/dispatch/bind.h"
 #include "mango/ext-protocol/ext-workspace.h"
 #include "mango/input/device.h"
 #include "mango/input/keyboard.h"
+#include "mango/layout/arrange.h"
 #include "mango/layout/layout.h"
 #include "mango/manage/client.h"
+#include "mango/manage/dyn_tags.h"
 #include "mango/manage/layer.h"
 #include "mango/manage/monitor.h"
 #include <errno.h>
@@ -115,6 +119,8 @@ cJSON *build_tags_json(Monitor *m) {
 		int numclients = 0;
 		bool is_active = false, is_urgent = false;
 		uint32_t tag_bit = 1 << (tag - 1);
+		if (!(m->active_tags_mask & tag_bit))
+			continue;
 		if (tag_bit & active_tagset)
 			is_active = true;
 		wl_list_for_each(c, &server.clients, link) {
@@ -132,6 +138,11 @@ cJSON *build_tags_json(Monitor *m) {
 		cJSON_AddBoolToObject(tag_obj, "is_urgent", is_urgent);
 		cJSON_AddStringToObject(tag_obj, "layout",
 								m->pertag->ltidxs[tag]->symbol);
+		cJSON_AddStringToObject(tag_obj, "layout_name",
+								m->pertag->ltidxs[tag]->name);
+		if (m->pertag->tag_names[tag][0] != '\0')
+			cJSON_AddStringToObject(tag_obj, "name",
+									m->pertag->tag_names[tag]);
 		cJSON_AddNumberToObject(tag_obj, "client_count", numclients);
 		cJSON_AddItemToArray(tags_array, tag_obj);
 	}
@@ -606,6 +617,9 @@ cJSON *build_client_json(Client *c) {
 	cJSON_AddBoolToObject(obj, "is_urgent", c->isurgent);
 	cJSON_AddBoolToObject(obj, "is_scratchpad", c->is_in_scratchpad);
 	cJSON_AddBoolToObject(obj, "is_namedscratchpad", c->isnamedscratchpad);
+	cJSON_AddBoolToObject(obj, "is_migrated", c->oldmonname[0] != '\0');
+	cJSON_AddStringToObject(obj, "source_monitor", c->oldmonname);
+	cJSON_AddItemToObject(obj, "source_tags", tags_mask_to_array(c->oldmon_tags));
 	cJSON_AddNumberToObject(obj, "x", c->geom.x);
 	cJSON_AddNumberToObject(obj, "y", c->geom.y);
 	cJSON_AddNumberToObject(obj, "width", c->geom.width);
@@ -754,7 +768,8 @@ void handle_command(int client_fd, const char *cmd_raw) {
 		}
 		int tag_idx = ext_tag_idx - 1;
 		Monitor *m = monitor_by_name(mon_name);
-		if (!m || tag_idx < 0 || tag_idx >= config.tag_num) {
+		if (!m || tag_idx < 0 || tag_idx >= config.tag_num ||
+			!(m->active_tags_mask & (1u << tag_idx))) {
 			send_static_json(client_fd,
 							 "{\"error\":\"invalid monitor or tag index\"}\n");
 			return;
@@ -897,6 +912,301 @@ void handle_command(int client_fd, const char *cmd_raw) {
 		resp = build_monitor_tags_response(m);
 	} else if (strcmp(cmd, "get layouts") == 0) {
 		resp = build_layouts_response();
+	} else if (strcmp(cmd, "add_tag") == 0 ||
+			   strncmp(cmd, "add_tag ", 8) == 0) {
+		/* add_tag [name:<name>] [<command to spawn on the new tag>] */
+		Monitor *m = server.selected_monitor;
+		char tag_name[64] = "";
+		char *spawn_cmd = NULL;
+		const char *payload = cmd_raw + 7;
+		int32_t idx;
+
+		if (!m) {
+			send_static_json(client_fd,
+							 "{\"error\":\"no focused monitor\"}\n");
+			return;
+		}
+		if (dyn_tag_first_free(m) < 0) {
+			send_static_json(client_fd,
+							 "{\"error\":\"max tags limit reached\"}\n");
+			return;
+		}
+
+		while (*payload == ' ')
+			payload++;
+		if (strncmp(payload, "name:", 5) == 0) {
+			const char *end = payload + 5;
+			size_t nlen;
+
+			while (*end && *end != ' ')
+				end++;
+			nlen = end - (payload + 5);
+			if (nlen >= sizeof(tag_name))
+				nlen = sizeof(tag_name) - 1;
+			memcpy(tag_name, payload + 5, nlen);
+			tag_name[nlen] = '\0';
+			payload = end;
+			while (*payload == ' ')
+				payload++;
+		}
+		if (*payload != '\0')
+			spawn_cmd = strdup(payload);
+
+		idx = dyn_tag_create(m, tag_name, spawn_cmd != NULL);
+		/* new dynamic tags always start as a plain tile */
+		m->pertag->ltidxs[idx] = &layouts[TILE];
+
+		client_switch_view(&(Arg){.ui = 1u << (idx - 1)}, true);
+		arrange(m, false, false);
+		printstatus(IPC_WATCH_ARRANGGE);
+
+		if (spawn_cmd) {
+			spawn_shell(&(Arg){.v = spawn_cmd});
+			free(spawn_cmd);
+		}
+
+		resp = cJSON_CreateObject();
+		cJSON_AddBoolToObject(resp, "success", true);
+		cJSON_AddNumberToObject(resp, "index", idx);
+		cJSON_AddStringToObject(resp, "monitor", m->wlr_output->name);
+		if (tag_name[0] != '\0')
+			cJSON_AddStringToObject(resp, "name", tag_name);
+		cJSON_AddStringToObject(resp, "layout", m->pertag->ltidxs[idx]->symbol);
+		cJSON_AddStringToObject(resp, "layout_name",
+								m->pertag->ltidxs[idx]->name);
+	} else if (strncmp(cmd, "remove_tag", 10) == 0 &&
+			   (cmd[10] == '\0' || cmd[10] == ' ')) {
+		/* remove_tag [<index>] [force]: close a dynamic tag; force kills the
+		 * clients that are still on it */
+		Monitor *m = server.selected_monitor;
+		int32_t tag_idx = -1;
+		bool force_kill = false;
+		char words[2][32] = {"", ""};
+		int32_t nwords;
+
+		if (!m) {
+			send_static_json(client_fd,
+							 "{\"error\":\"no focused monitor\"}\n");
+			return;
+		}
+
+		nwords = sscanf(cmd + 10, "%31s %31s", words[0], words[1]);
+		for (int32_t w = 0; w < nwords; w++) {
+			if (strcmp(words[w], "force") == 0 || strcmp(words[w], "1") == 0 ||
+				strcmp(words[w], "true") == 0) {
+				/* tag 1 is never dynamic, so "1" can only mean force */
+				force_kill = true;
+			} else {
+				tag_idx = atoi(words[w]);
+			}
+		}
+		if (tag_idx == -1)
+			tag_idx = dyn_tag_last_active(m);
+
+		if (tag_idx <= config.initial_tags_count || tag_idx > config.tag_num ||
+			!monitor_tag_active(m, tag_idx)) {
+			send_static_json(
+				client_fd,
+				"{\"error\":\"invalid or inactive dynamic tag index\"}\n");
+			return;
+		}
+		if (monitor_active_tag_count(m) <= 1) {
+			send_static_json(
+				client_fd,
+				"{\"error\":\"cannot remove the last active tag\"}\n");
+			return;
+		}
+
+		uint32_t tag_mask = 1u << (tag_idx - 1);
+		uint32_t mask_before = m->active_tags_mask;
+		uint32_t killed[256];
+		int32_t nkilled = 0;
+
+		if (dyn_tag_has_clients(m, tag_mask)) {
+			if (!force_kill) {
+				send_static_json(client_fd,
+								 "{\"error\":\"tag has active clients\"}\n");
+				return;
+			}
+			dyn_tag_evict_clients(m, tag_mask, killed, 256, &nkilled);
+		}
+
+		dyn_tag_deactivate(m, tag_idx);
+
+		resp = cJSON_CreateObject();
+		cJSON_AddBoolToObject(resp, "success", true);
+		cJSON_AddNumberToObject(resp, "removed_tag", tag_idx);
+		cJSON_AddNumberToObject(resp, "tag_mask", tag_mask);
+		cJSON_AddNumberToObject(resp, "active_tags_mask_before", mask_before);
+		cJSON *killed_arr = cJSON_CreateArray();
+		for (int32_t k = 0; k < nkilled; k++)
+			cJSON_AddItemToArray(killed_arr, cJSON_CreateNumber(killed[k]));
+		cJSON_AddItemToObject(resp, "killed_clients", killed_arr);
+		cJSON_AddNumberToObject(resp, "active_tags_mask_after",
+								m->active_tags_mask);
+	} else if (strncmp(cmd, "move_tag ", 9) == 0) {
+		/* move_tag [<source monitor>] <tag index> <destination monitor> */
+		int32_t tag_idx;
+		char arg1[256] = "", arg2[256] = "", arg3[256] = "";
+		char src_mon_name[256] = "", dest_mon_name[256] = "";
+		int32_t parsed = sscanf(cmd + 9, "%255s %255s %255s", arg1, arg2, arg3);
+
+		if (parsed == 3) {
+			snprintf(src_mon_name, sizeof(src_mon_name), "%s", arg1);
+			tag_idx = atoi(arg2);
+			snprintf(dest_mon_name, sizeof(dest_mon_name), "%s", arg3);
+		} else if (parsed == 2) {
+			tag_idx = atoi(arg1);
+			snprintf(dest_mon_name, sizeof(dest_mon_name), "%s", arg2);
+		} else {
+			send_static_json(
+				client_fd,
+				"{\"error\":\"usage: move_tag [source_monitor] <tag_index> "
+				"<destination_monitor>\"}\n");
+			return;
+		}
+
+		if (tag_idx <= config.initial_tags_count || tag_idx > config.tag_num) {
+			char err_msg[256];
+			snprintf(err_msg, sizeof(err_msg),
+					 "{\"error\":\"tag index must be a dynamic tag (greater "
+					 "than %d and <= %d)\"}\n",
+					 config.initial_tags_count, config.tag_num);
+			send_static_json(client_fd, err_msg);
+			return;
+		}
+
+		Monitor *dest_mon = monitor_by_name(dest_mon_name);
+		if (!dest_mon || !dest_mon->wlr_output->enabled) {
+			send_static_json(
+				client_fd,
+				"{\"error\":\"destination monitor not found or disabled\"}\n");
+			return;
+		}
+
+		Monitor *src_mon = NULL;
+		if (src_mon_name[0] != '\0') {
+			src_mon = monitor_by_name(src_mon_name);
+			if (!src_mon || !src_mon->wlr_output->enabled ||
+				!monitor_tag_active(src_mon, tag_idx)) {
+				send_static_json(client_fd,
+								 "{\"error\":\"source monitor not found or tag "
+								 "index not active on it\"}\n");
+				return;
+			}
+		} else {
+			Monitor *it;
+			wl_list_for_each(it, &server.monitors, link) {
+				if (it->wlr_output->enabled && it != dest_mon &&
+					monitor_tag_active(it, tag_idx)) {
+					src_mon = it;
+					break;
+				}
+			}
+		}
+		if (!src_mon) {
+			send_static_json(client_fd,
+							 "{\"error\":\"tag index is not active on any "
+							 "source monitor\"}\n");
+			return;
+		}
+		if (src_mon == dest_mon) {
+			send_static_json(
+				client_fd,
+				"{\"error\":\"tag is already on the destination monitor\"}\n");
+			return;
+		}
+
+		/* the tag keeps its number on the destination when it is free there,
+		 * otherwise it takes the lowest free dynamic tag */
+		uint32_t src_tag_mask = 1u << (tag_idx - 1);
+		int32_t dest_tag_idx = monitor_tag_active(dest_mon, tag_idx)
+								   ? dyn_tag_first_free(dest_mon)
+								   : tag_idx;
+		if (dest_tag_idx < 0) {
+			send_static_json(client_fd,
+							 "{\"error\":\"no free dynamic tags available on "
+							 "destination monitor\"}\n");
+			return;
+		}
+		uint32_t dest_tag_mask = 1u << (dest_tag_idx - 1);
+
+		/* move the clients; scratchpads stay independent, except a visible
+		 * one on the tag, which goes along */
+		dest_mon->active_tags_mask |= dest_tag_mask;
+		server.is_migration_active = true;
+
+		Client *c, *tmp;
+		wl_list_for_each_safe(c, tmp, &server.clients, link) {
+			if (c->mon != src_mon || !(c->tags & src_tag_mask))
+				continue;
+			if (!c->is_in_scratchpad) {
+				client_set_monitor(c, dest_mon, dest_tag_mask, false);
+			} else if (SCRATCHPAD_SHOWN(c)) {
+				client_set_monitor(c, dest_mon, dest_tag_mask, false);
+				c->oldtags = dest_tag_mask;
+				client_recalculate_floating_geom(c, dest_mon);
+				resize(c, c->float_geom, (ResizeOpts){.interact = 0});
+			}
+		}
+
+		/* the slot goes with the tag: name, layout and layout parameters */
+		snprintf(dest_mon->pertag->tag_names[dest_tag_idx],
+				 sizeof(dest_mon->pertag->tag_names[dest_tag_idx]), "%s",
+				 src_mon->pertag->tag_names[tag_idx]);
+		dest_mon->pertag->ltidxs[dest_tag_idx] =
+			src_mon->pertag->ltidxs[tag_idx];
+		dest_mon->pertag->nmasters[dest_tag_idx] =
+			src_mon->pertag->nmasters[tag_idx];
+		dest_mon->pertag->mfacts[dest_tag_idx] = src_mon->pertag->mfacts[tag_idx];
+		src_mon->pertag->tag_names[tag_idx][0] = '\0';
+
+		server.is_migration_active = false;
+
+		/* the tag left the source monitor */
+		if (!dyn_tag_has_clients(src_mon, src_tag_mask) &&
+			monitor_active_tag_count(src_mon) > 1)
+			dyn_tag_deactivate(src_mon, tag_idx);
+		client_view_on_monitor(&(Arg){.ui = dest_tag_mask}, false, dest_mon,
+							   false);
+		arrange(src_mon, false, false);
+		arrange(dest_mon, false, false);
+		printstatus(IPC_WATCH_ARRANGGE);
+
+		resp = cJSON_CreateObject();
+		cJSON_AddBoolToObject(resp, "success", true);
+		cJSON_AddStringToObject(resp, "source_monitor",
+								src_mon->wlr_output->name);
+		cJSON_AddStringToObject(resp, "destination_monitor",
+								dest_mon->wlr_output->name);
+		cJSON_AddNumberToObject(resp, "source_tag", tag_idx);
+		cJSON_AddNumberToObject(resp, "destination_tag", dest_tag_idx);
+	} else if (strncmp(cmd, "viewmon ", 8) == 0) {
+		/* viewmon <monitor> <tag index>: focus a monitor and view a tag */
+		char mon_name[256] = "";
+		int32_t tag_idx = -1;
+
+		if (sscanf(cmd + 8, "%255s %d", mon_name, &tag_idx) != 2) {
+			send_static_json(
+				client_fd, "{\"error\":\"usage: viewmon <monitor> <tag>\"}\n");
+			return;
+		}
+		Monitor *target_mon = monitor_by_name(mon_name);
+		if (!target_mon) {
+			send_static_json(client_fd,
+							 "{\"error\":\"monitor not found\"}\n");
+			return;
+		}
+		if (!monitor_tag_active(target_mon, tag_idx)) {
+			send_static_json(
+				client_fd,
+				"{\"error\":\"invalid or inactive tag index\"}\n");
+			return;
+		}
+		focus_monitor(&(Arg){.v = mon_name, .i = UNDIR});
+		client_switch_view(&(Arg){.ui = 1u << (tag_idx - 1)}, true);
+		resp = cJSON_CreateObject();
+		cJSON_AddBoolToObject(resp, "success", true);
 	} else if (strncmp(cmd, "mark_client ", 12) == 0) {
 		uint32_t client_id = 0;
 		char mark_name[256] = "";

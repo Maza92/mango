@@ -62,6 +62,8 @@ bind=alt,k,toggle_named_scratchpad,none,kitty-scratch,kitty -T kitty-scratch
 
 A named scratchpad is a **singleton**: it is looked up on every monitor and, when toggled, moves to the focused monitor and is resized from its window rule (or from `scratchpad_width_ratio` / `scratchpad_height_ratio` when no rule sets a size).
 
+A scratchpad can be bound to a dynamic tag with a fourth value (`1`): `bind=alt,n,toggle_named_scratchpad,notes,none,kitty,1`. It is closed together with the tag instead of being released from it.
+
 ## Marks
 
 A mark is a name carried by one client. Use it in place of `app_id` to find a scratchpad regardless of its title or app id:

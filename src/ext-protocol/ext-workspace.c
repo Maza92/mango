@@ -62,6 +62,15 @@ void cleanup_workspaces_by_monitor(Monitor *m) {
 	}
 }
 
+static bool workspace_exists_for_tag(uint32_t tag, Monitor *m) {
+	struct workspace *workspace;
+	wl_list_for_each(workspace, &workspaces, link) {
+		if (workspace->tag == tag && workspace->m == m)
+			return true;
+	}
+	return false;
+}
+
 void add_workspace_by_tag(int32_t tag, Monitor *m) {
 	const char *name = get_name_from_tag(tag);
 
@@ -93,8 +102,14 @@ void refresh_monitors_workspaces_status(Monitor *m) {
 		}
 	} else {
 		remove_workspace_by_tag(0, m);
+		/* only active tags are workspaces; dynamic tags come and go */
 		for (i = 1; i <= config.tag_num; i++) {
-			add_workspace_by_tag(i, m);
+			if (m->active_tags_mask & (1u << (i - 1))) {
+				if (!workspace_exists_for_tag(i, m))
+					add_workspace_by_tag(i, m);
+			} else {
+				remove_workspace_by_tag(i, m);
+			}
 		}
 	}
 
@@ -225,13 +240,19 @@ void sync_workspaces_to_tag_num(Monitor *m) {
 		if (!has_overview)
 			add_workspace_by_tag(0, m);
 	} else {
-		// Normal state: destroy old tag workspaces beyond tag_num.
+		// Normal state: destroy workspaces beyond tag_num or of tags that are
+		// no longer active on this monitor.
 		wl_list_for_each_safe(w, tmp, &workspaces, link) {
-			if (w->m == m && w->tag > config.tag_num)
+			if (w->m != m || w->tag == 0)
+				continue;
+			if (w->tag > config.tag_num ||
+				!(m->active_tags_mask & (1u << (w->tag - 1))))
 				destroy_workspace(w);
 		}
 		// Adds missing tags.
 		for (int32_t i = 1; i <= config.tag_num; i++) {
+			if (!(m->active_tags_mask & (1u << (i - 1))))
+				continue;
 			bool exists = false;
 			wl_list_for_each(w, &workspaces, link) {
 				if (w->m == m && w->tag == i) {

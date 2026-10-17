@@ -73,6 +73,18 @@ mmsg watch all-monitors
 mmsg watch all-tags
 ```
 
+### DYNAMIC TAGS
+Tags above `initial_tags_count` are opened and closed at runtime. Only active tags are listed by `get tags` / `get all-tags` / `get tag`; each carries `layout_name` and, when named, `name`.
+
+| Command | Description |
+| :--- | :--- |
+| `add_tag [name:<name>] [<command>]` | Open a dynamic tag on the focused monitor and view it. The optional command is run on the new tag; the tag is kept for 30 s while waiting for its window. |
+| `remove_tag [<index>] [force]` | Close a dynamic tag (the highest one by default). It fails while the tag has clients, unless `force` kills them. |
+| `move_tag [<source monitor>] <index> <destination monitor>` | Move a dynamic tag with its clients to another monitor; it keeps its number there if that is free, else takes the lowest free one. |
+| `viewmon <monitor> <index>` | Focus a monitor and view one of its active tags. |
+
+Clients report `is_migrated`, `source_monitor` and `source_tags` after leaving a monitor.
+
 ### MARK
 * `mark_client <id> <mark>`: give a client a mark (`none` clears it). The mark is reported as `mark` in the client JSON.
 

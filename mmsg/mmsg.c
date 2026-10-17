@@ -28,6 +28,12 @@ static void usage(void) {
 		   "ID\n");
 	printf("  get client_by_mark <mark>                Show client details by "
 		   "mark\n");
+	printf("  add_tag [name:<name>] [command]          Open a dynamic tag\n");
+	printf("  remove_tag [index] [force]               Close a dynamic tag\n");
+	printf("  move_tag [src] <index> <dest>            Move a dynamic tag to "
+		   "another monitor\n");
+	printf("  viewmon <monitor> <index>                Focus a monitor and view "
+		   "a tag\n");
 	printf("  mark_client <id> <mark>                  Set a client mark "
 		   "('none' clears it)\n");
 	printf("  get tag <monitor> <index>                Show tag details "
